@@ -6,7 +6,7 @@ from detectors import ObjectDetector, merge_person_detections
 
 
 COOLDOWN_SECONDS = 3
-
+RESET_COOLDOWN_SECONDS = 1
 def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -32,7 +32,8 @@ def main():
                 state["active"] = True
                 state["last_alert"] = now
         if not condition and state["active"]:
-            state["active"] = False
+            if (now - state["last_alert"]) > RESET_COOLDOWN_SECONDS:
+                state["active"] = False
 
 
     while True:
