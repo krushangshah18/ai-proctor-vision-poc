@@ -20,5 +20,15 @@ def draw_detections(frame, detections):
         x1, y1, x2, y2 = det["bbox"]
         label = f"{det['class']} : {det['confidence']:.2f}"
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+        cv2.rectangle(frame, 
+                      pt1=(x1, y1), 
+                      pt2=(x2, y2), 
+                      color=(0, 255, 0), 
+                      thickness=2)
+        cv2.putText(frame, 
+                    label, 
+                    org=(x1, y1-10), 
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX, 
+                    fontScale=0.6, 
+                    color=(0, 255, 0), 
+                    thickness=1)

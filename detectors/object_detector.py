@@ -87,16 +87,17 @@ class ObjectDetector:
             "cell phone": book_and_mobile_confidence_threshold,
             "default": confidence_threshold
         }
-        
 
         #COCO Classes Data set on which YOLO is trained : Common objects in Context
         self.target_classes = {"cell phone", "person", "book",}
 
     def detect(self, frame):
+        #Running the YOLO model on the current frame (verbose=False : supresses YOLO console logs)
         results = self.model(frame, verbose=False)
 
         detections=[]
 
+        #Appending detections to the list after properly structuring data
         def appendDetections(class_name, confidence, box):                
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
@@ -107,14 +108,16 @@ class ObjectDetector:
             })
 
         for r in results:
-            for box in r.boxes:
+            for box in r.boxes: 
                 cls_id = int(box.cls[0])
                 class_name = self.model.names[cls_id]
                 confidence = float(box.conf[0])
 
+                #filtering so only the detections we are concerned with are returned
                 if class_name not in self.target_classes:
                     continue
                 
+                #get threshold based on class if not then default threshold
                 threshold = self.class_thresholds.get(class_name, self.confidence_threshold)
                 if confidence >= threshold:
                     appendDetections(class_name, confidence, box)
