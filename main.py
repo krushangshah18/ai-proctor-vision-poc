@@ -1,199 +1,93 @@
 import cv2
-import time
-from utils import AlertManager
-from utils import draw_alerts, draw_detections
+
+from config import *
+from utils import AlertManager, draw_alerts, draw_detections
 from detectors import ObjectDetector, merge_person_detections, HeadPoseDetector
-
-
-COOLDOWN_SECONDS = 3
-RESET_COOLDOWN_SECONDS = 1
-LOOKING_AWAY_THRESHOLD_SECONDS = 1.5
-SAMPLE_INTERVAL = 0.2
-def compute_variance(values):
-    if len(values) < 10:
-        return 1.0  # not enough data → assume real
-    mean = sum(values) / len(values)
-    return sum((v - mean) ** 2 for v in values) / len(values)
-
+from core import AlertEngine, HeadTracker, LivenessDetector
 
 def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Could Not open WebCam")
-    
-    alert_manager = AlertManager()
-    detector = ObjectDetector()
-    head_pose_detector = HeadPoseDetector()
 
     states = {
     "phone" : {"active":False, "last_alert":0, "message":"ALERT: Mobile phone detected"},
     "multiple_people" : {"active":False, "last_alert":0, "message":"ALERT: Multiple people detected"},
     "no_person" : {"active":False, "last_alert":0, "message":"ALERT: No person present"},
     "book" : {"active":False, "last_alert":0, "message":"ALERT: Book detected"},
-    "looking_away": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Looking away from screen"},
-    "looking_down": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Looking down for long time"},
-    "looking_side": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Looking away (eye gaze)"},
-    "face_hidden": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face not clearly visible / Camera blocked"},
-    "partial_face": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face not fully visible"},
     
-    # "static_face": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence detected"},
-    "fake_presence": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence (no blinking)"
-},
-
+    "looking_away": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Candidate is not facing the screen"},
+    "looking_down": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Candidate is looking down for extended duration"},
+    "looking_side": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Candidate is looking away from the screen (eye gaze detected)"},
+    "face_hidden": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face not clearly visible (possible obstruction)"},
+    "partial_face": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face appears too small (candidate may be too far from camera)"},
+    "fake_presence": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence detected (no eye blink / low movement)"}
     }
 
-    def trigger(alert_key, condition):
-        now = time.time()
-        state = states[alert_key]
+    alert_manager = AlertManager()
+    detector = ObjectDetector()
+    head_pose_detector = HeadPoseDetector()
 
-        if condition:
-            if (not state["active"] or (now - state["last_alert"]) > COOLDOWN_SECONDS):
-                alert_manager.add_alert(state["message"])
-                state["active"] = True
-                state["last_alert"] = now
-                
-        if not condition and state["active"]:
-            if (now - state["last_alert"]) > RESET_COOLDOWN_SECONDS:
-                state["active"] = False
-
-    def head_movement(frame, state_key, looking_Condition):
-        now = time.time()
-        this_state = states[state_key]
-        label = state_key.replace("_", " ").title()
-
-        if looking_Condition:
-
-            if this_state["start_time"] is None:
-                this_state["start_time"] = now
-
-            duration = now - this_state["start_time"]
-
-            if duration >= LOOKING_AWAY_THRESHOLD_SECONDS:
-                trigger(state_key, True)
-        else:
-            this_state["start_time"] = None
-            this_state["active"] = False
-
-        if this_state["start_time"] is not None:
-            elapsed = now - this_state["start_time"]
-            cv2.putText(
-                    frame,
-                    f"{label}: {elapsed:.1f}s",
-                    (20, 110),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-            ) 
+    alerts = AlertEngine(alert_manager, states, COOLDOWN_SECONDS, RESET_COOLDOWN_SECONDS)
+    tracker = HeadTracker(states, LOOKING_AWAY_THRESHOLD)
+    liveness = LivenessDetector(FAKE_WINDOW, SAMPLE_INTERVAL, MIN_VARIANCE, NO_BLINK_TIMEOUT, LIVENESS_WEIGHTS)
 
 
-    # Fake presence buffers
-    yaw_hist = []
-    pitch_hist = []
-    gaze_hist = []
-    yaw_hist.append((time.time(), 0))
-    pitch_hist.append((time.time(), 0))
-    gaze_hist.append((time.time(), 0))
-
-    FAKE_WINDOW = 15.0      # seconds
-    MIN_VARIANCE = 0.001   # tune later
-    NO_BLINK_TIMEOUT = 10  # seconds
-    last_blink_time = time.time()
+    def track_and_alert(frame, key, condition):
+        triggered = tracker.process(frame, key, condition)
+        alerts.trigger(key, triggered)
 
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        ok, frame = cap.read()
+        if not ok:
             break
 
-        detections = detector.detect(frame)
-        detections = merge_person_detections(detections, iou_threshold=0.5)
+        detections = merge_person_detections(detector.detect(frame), iou_threshold=0.5)
 
         (
             looking_away,
             looking_down,
-            looking_up,
+            _,
             looking_left,
             looking_right,
             partial_face,
-            yaw_ratio,
-            pitch_ratio,
-            gaze_ratio,
-            ear,
+            yaw,
+            pitch,
+            gaze,
+            _,
             blinked,
-            total_blinks
+            _
 
         ) = head_pose_detector.detect(frame, draw=True)
 
+        #Liveness
+        liveness.update(yaw, pitch, gaze, blinked)
+        fake, var_ = liveness.is_fake()
+        track_and_alert(frame, "fake_presence", fake) 
 
-        now = time.time()
-        if now - yaw_hist[-1][0] > SAMPLE_INTERVAL:
-            yaw_hist.append((now, yaw_ratio))
-            pitch_hist.append((now, pitch_ratio))
-            gaze_hist.append((now, gaze_ratio))
+        #Head Movement
+        track_and_alert(frame, "looking_away", looking_away)
+        track_and_alert(frame, "looking_down", looking_down)
+        track_and_alert(frame, "looking_side", looking_left or looking_right)
+        track_and_alert(frame, "partial_face", partial_face)
+        track_and_alert(frame, "face_hidden", (yaw == 0.0 and pitch == 0.0 and gaze == 0.0))
 
-        yaw_hist = [(t,v) for t,v in yaw_hist if now - t <= FAKE_WINDOW]
-        pitch_hist = [(t,v) for t,v in pitch_hist if now - t <= FAKE_WINDOW]
-        gaze_hist = [(t,v) for t,v in gaze_hist if now - t <= FAKE_WINDOW]
+        #Objects
+        phone = any(d["class"] == "cell phone" for d in detections)
+        book = any(d["class"] == "book" for d in detections)
+        people_count = sum(1 for d in detections if d["class"] == "person")
 
+        alerts.trigger("phone", phone)
+        alerts.trigger("book", book)
+        alerts.trigger("multiple_people", people_count > 1)
+        alerts.trigger("no_person", people_count == 0)
 
-        
-        yaw_var = compute_variance([v for _, v in yaw_hist])
-        pitch_var = compute_variance([v for _, v in pitch_hist])
-        gaze_var = compute_variance([v for _, v in gaze_hist])
-        # print(f"===========len: {len(yaw_hist)}============vars : {yaw_var},{pitch_var},{gaze_var}")
-        score = (
-                0.45 * yaw_var +
-                0.45 * gaze_var +
-                0.10 * pitch_var
-            )
-        static_face = score < MIN_VARIANCE
-        # head_movement(frame, "static_face", static_face)
-
-        cv2.putText(
-            frame,
-            f"Var Y:{yaw_var:.4f} P:{pitch_var:.4f} G:{gaze_var:.4f}",
-            (20, 170),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255,255,0),
-            1
-        )
-
-        if blinked:
-            last_blink_time = time.time()
-
-        no_blink = (time.time() - last_blink_time) > NO_BLINK_TIMEOUT
-        fake = static_face and no_blink
-
-        head_movement(frame, "fake_presence", fake)
-
-
-
-        side_gaze = looking_left or looking_right
-        invalid_face = (yaw_ratio == 0.0 and pitch_ratio == 0.0 and gaze_ratio == 0.0)
-
-        head_movement(frame, "looking_away", looking_away)
-        head_movement(frame, "looking_down", looking_down)
-        head_movement(frame, "looking_side", side_gaze)
-        head_movement(frame, "face_hidden", invalid_face)
-        head_movement(frame, "partial_face", partial_face)
 
         draw_detections(frame, detections)
+        draw_alerts(frame, alert_manager.get_active_alerts())
 
-        phone_detected = any(d["class"] == "cell phone" for d in detections)
-        people_count = sum(1 for d in detections if d["class"] == "person")
-        book_detected = any(d["class"] == "book" for d in detections)
-
-        trigger("phone", phone_detected)
-        trigger("book", book_detected)
-        trigger("multiple_people", people_count > 1)
-        trigger("no_person", people_count == 0)
-        
-        active_alerts = alert_manager.get_active_alerts()
-        draw_alerts(frame, active_alerts)
-
-        cv2.imshow("AI Proctoring Vision POC", frame)
+        cv2.imshow("AI Proctor", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break 

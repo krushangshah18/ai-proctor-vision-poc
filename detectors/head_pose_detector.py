@@ -264,7 +264,7 @@ class HeadPoseDetector:
             cv2.putText(
                 frame,
                 f"EAR: {ear:.2f} | Blinks: {self.total_blinks}",
-                (20, 400),
+                (20, 170),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (255, 0, 255),
