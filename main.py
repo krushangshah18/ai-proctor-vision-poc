@@ -8,6 +8,13 @@ from detectors import ObjectDetector, merge_person_detections, HeadPoseDetector
 COOLDOWN_SECONDS = 3
 RESET_COOLDOWN_SECONDS = 1
 LOOKING_AWAY_THRESHOLD_SECONDS = 1.5
+SAMPLE_INTERVAL = 0.2
+def compute_variance(values):
+    if len(values) < 10:
+        return 1.0  # not enough data → assume real
+    mean = sum(values) / len(values)
+    return sum((v - mean) ** 2 for v in values) / len(values)
+
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -28,6 +35,11 @@ def main():
     "looking_side": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Looking away (eye gaze)"},
     "face_hidden": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face not clearly visible / Camera blocked"},
     "partial_face": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face not fully visible"},
+    
+    # "static_face": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence detected"},
+    "fake_presence": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence (no blinking)"
+},
+
     }
 
     def trigger(alert_key, condition):
@@ -74,6 +86,21 @@ def main():
                     2,
             ) 
 
+
+    # Fake presence buffers
+    yaw_hist = []
+    pitch_hist = []
+    gaze_hist = []
+    yaw_hist.append((time.time(), 0))
+    pitch_hist.append((time.time(), 0))
+    gaze_hist.append((time.time(), 0))
+
+    FAKE_WINDOW = 15.0      # seconds
+    MIN_VARIANCE = 0.001   # tune later
+    NO_BLINK_TIMEOUT = 10  # seconds
+    last_blink_time = time.time()
+
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -91,8 +118,57 @@ def main():
             partial_face,
             yaw_ratio,
             pitch_ratio,
-            gaze_ratio
+            gaze_ratio,
+            ear,
+            blinked,
+            total_blinks
+
         ) = head_pose_detector.detect(frame, draw=True)
+
+
+        now = time.time()
+        if now - yaw_hist[-1][0] > SAMPLE_INTERVAL:
+            yaw_hist.append((now, yaw_ratio))
+            pitch_hist.append((now, pitch_ratio))
+            gaze_hist.append((now, gaze_ratio))
+
+        yaw_hist = [(t,v) for t,v in yaw_hist if now - t <= FAKE_WINDOW]
+        pitch_hist = [(t,v) for t,v in pitch_hist if now - t <= FAKE_WINDOW]
+        gaze_hist = [(t,v) for t,v in gaze_hist if now - t <= FAKE_WINDOW]
+
+
+        
+        yaw_var = compute_variance([v for _, v in yaw_hist])
+        pitch_var = compute_variance([v for _, v in pitch_hist])
+        gaze_var = compute_variance([v for _, v in gaze_hist])
+        # print(f"===========len: {len(yaw_hist)}============vars : {yaw_var},{pitch_var},{gaze_var}")
+        score = (
+                0.45 * yaw_var +
+                0.45 * gaze_var +
+                0.10 * pitch_var
+            )
+        static_face = score < MIN_VARIANCE
+        # head_movement(frame, "static_face", static_face)
+
+        cv2.putText(
+            frame,
+            f"Var Y:{yaw_var:.4f} P:{pitch_var:.4f} G:{gaze_var:.4f}",
+            (20, 170),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255,255,0),
+            1
+        )
+
+        if blinked:
+            last_blink_time = time.time()
+
+        no_blink = (time.time() - last_blink_time) > NO_BLINK_TIMEOUT
+        fake = static_face and no_blink
+
+        head_movement(frame, "fake_presence", fake)
+
+
 
         side_gaze = looking_left or looking_right
         invalid_face = (yaw_ratio == 0.0 and pitch_ratio == 0.0 and gaze_ratio == 0.0)
@@ -102,7 +178,7 @@ def main():
         head_movement(frame, "looking_side", side_gaze)
         head_movement(frame, "face_hidden", invalid_face)
         head_movement(frame, "partial_face", partial_face)
-        
+
         draw_detections(frame, detections)
 
         phone_detected = any(d["class"] == "cell phone" for d in detections)

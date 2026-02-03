@@ -1,6 +1,11 @@
 import cv2
+import math
+
 import mediapipe as mp
 # Mediapipe : face landmark detection, gives 468 facial points
+
+
+
 class HeadPoseDetector:
     def __init__(self):
         self.mp_face_mesh = mp.solutions.face_mesh #This module detects facial landmarks
@@ -31,6 +36,31 @@ class HeadPoseDetector:
         self.MIN_FACE_WIDTH = 80
         self.MIN_FACE_HEIGHT = 100
 
+
+        # Eye landmarks (MediaPipe)
+        self.LEFT_EYE = [33, 160, 158, 133, 153, 144]
+        self.RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+
+        # Blink config
+        self.EAR_THRESHOLD = 0.20 #(Eye Aspect Ratio) : measures how open the eye is
+        self.BLINK_FRAMES = 2
+
+        self.blink_counter = 0
+        self.total_blinks = 0
+
+    
+    def _euclidean(self, p1, p2):
+        return math.dist(p1, p2)
+
+
+    def _eye_aspect_ratio(self, eye_points):
+        A = self._euclidean(eye_points[1], eye_points[5])
+        B = self._euclidean(eye_points[2], eye_points[4])
+        C = self._euclidean(eye_points[0], eye_points[3])
+
+        return (A + B) / (2.0 * C)
+
+
     def detect(self, frame, draw=True):
         """
         Returns:
@@ -45,7 +75,8 @@ class HeadPoseDetector:
 
         #no face detected
         if not results.multi_face_landmarks:
-            return False, False, False, False, False, False,0.0, 0.0, 0.0
+            self.blink_counter = 0
+            return False, False, False, False, False, False,0.0, 0.0, 0.0,0,False,0
         
         """
         multi_face_landmarks → list of faces
@@ -91,6 +122,37 @@ class HeadPoseDetector:
 
         face_center_x = (left_x + right_x) // 2 #Finds midpoint of cheeks. This is horizontal face center
         face_width = max(1,right_x-left_x)
+
+
+        left_eye = []
+        right_eye = []
+
+        for i in self.LEFT_EYE:
+            x = int(landmarks[i].x * w)
+            y = int(landmarks[i].y * h)
+            left_eye.append((x, y))
+
+        for i in self.RIGHT_EYE:
+            x = int(landmarks[i].x * w)
+            y = int(landmarks[i].y * h)
+            right_eye.append((x, y))
+
+        left_ear = self._eye_aspect_ratio(left_eye)
+        right_ear = self._eye_aspect_ratio(right_eye)
+
+        ear = (left_ear + right_ear) / 2.0
+        blinked = False
+
+        if ear < self.EAR_THRESHOLD:
+            self.blink_counter += 1
+        else:
+            if self.blink_counter >= self.BLINK_FRAMES:
+                self.total_blinks += 1
+                blinked = True
+
+            self.blink_counter = 0
+
+
         """
         If student moves closer to camera:Face looks bigger & Nose moves more in pixels
         If student moves away: Face looks smaller & Nose moves less
@@ -194,6 +256,22 @@ class HeadPoseDetector:
                 2
             )
 
+            # Draw eyes
+            for p in left_eye + right_eye:
+                cv2.circle(frame, p, 2, (255, 0, 255), -1)
+
+            # EAR + Blink info
+            cv2.putText(
+                frame,
+                f"EAR: {ear:.2f} | Blinks: {self.total_blinks}",
+                (20, 400),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 0, 255),
+                2
+            )
+
+
 
 
         return (
@@ -205,5 +283,8 @@ class HeadPoseDetector:
             partial_face,
             yaw_ratio,
             pitch_ratio,
-            gaze_ratio
+            gaze_ratio,
+            ear,
+            blinked,
+            self.total_blinks
         )
