@@ -78,18 +78,19 @@ def merge_person_detections(detections, iou_threshold=0.5):
 
     return other_dets + merged_persons
 
-class ObjectDetector:
-    def __init__(self, model_path="yolov8s.pt",confidence_threshold=0.5, book_and_mobile_confidence_threshold=0.3):
+class ObjectDetector: #yolov8s.pt
+    def __init__(self, model_path="best.pt",confidence_threshold=0.5, book_confidence_threshold=0.3,mobile_confidence_threshold=0.5, audio_device_confidence_threshold=0.25):
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
         self.class_thresholds = {
-            "book": book_and_mobile_confidence_threshold,
-            "cell phone": book_and_mobile_confidence_threshold,
+            "cell phone": mobile_confidence_threshold,
+            "book": book_confidence_threshold,
+            "audio device": audio_device_confidence_threshold,
             "default": confidence_threshold
         }
 
         #COCO Classes Data set on which YOLO is trained : Common objects in Context
-        self.target_classes = {"cell phone", "person", "book",}
+        self.target_classes = {"person", "cell phone", "book", "audio device"}
 
     def detect(self, frame):
         #Running the YOLO model on the current frame (verbose=False : supresses YOLO console logs)
