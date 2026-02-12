@@ -79,18 +79,19 @@ def merge_person_detections(detections, iou_threshold=0.5):
     return other_dets + merged_persons
 
 class ObjectDetector: #yolov8s.pt
-    def __init__(self, model_path="best.pt",confidence_threshold=0.5, book_confidence_threshold=0.3,mobile_confidence_threshold=0.5, audio_device_confidence_threshold=0.25):
+    def __init__(self, model_path="finalBest-v2.pt",confidence_threshold=0.5, book_confidence_threshold=0.3,mobile_confidence_threshold=0.5, audio_device_confidence_threshold=0.01):
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
         self.class_thresholds = {
-            "cell phone": mobile_confidence_threshold,
+            "cell_phone": mobile_confidence_threshold,
             "book": book_confidence_threshold,
-            "audio device": audio_device_confidence_threshold,
+            "headphone": audio_device_confidence_threshold,
+            "earbud": audio_device_confidence_threshold,
             "default": confidence_threshold
         }
 
         #COCO Classes Data set on which YOLO is trained : Common objects in Context
-        self.target_classes = {"person", "cell phone", "book", "audio device"}
+        self.target_classes = {"person", "cell_phone", "book", "headphone", "earbud"}
 
     def detect(self, frame):
         #Running the YOLO model on the current frame (verbose=False : supresses YOLO console logs)
@@ -110,7 +111,7 @@ class ObjectDetector: #yolov8s.pt
 
         for r in results:
             for box in r.boxes: 
-                cls_id = int(box.cls[0])
+                cls_id = int(box.cls[0])-1
                 class_name = self.model.names[cls_id]
                 confidence = float(box.conf[0])
 
