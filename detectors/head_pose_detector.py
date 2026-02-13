@@ -50,7 +50,10 @@ class HeadPoseDetector:
 
     
     def _euclidean(self, p1, p2):
-        return math.dist(p1, p2)
+        dx = p1[0] - p2[0]
+        dy = p1[1] - p2[1]
+        return (dx*dx + dy*dy) ** 0.5
+
 
 
     def _eye_aspect_ratio(self, eye_points):
@@ -180,8 +183,8 @@ class HeadPoseDetector:
         #threshold 
         LOOK_AWAY_YAW = 0.2
 
-        LOOK_DOWN_PITCH = 0.15
-        LOOK_UP_PITCH = -0.2
+        LOOK_DOWN_PITCH = 0.13
+        LOOK_UP_PITCH = -0.1
 
         GAZE_LEFT = -0.15
         GAZE_RIGHT = 0.15

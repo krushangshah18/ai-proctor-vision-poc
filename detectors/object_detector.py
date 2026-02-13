@@ -31,99 +31,131 @@ def compute_iou(boxA, boxB):
     """
     return inter_area / float(boxA_area + boxB_area - inter_area)
 
-def merge_person_detections(detections, iou_threshold=0.5):
-    """
-    Merges overlapping 'person' detections using IoU clustering.
-    Returns new detections list.
-    """
 
-    #Separate person vs non-person
-    person_dets = [d for d in detections if d["class"] == "person"]
-    other_dets = [d for d in detections if d["class"] != "person"]
+def merge_by_class(detections, classes, iou_threshold=0.5):
 
-    clusters = []
-    """
-    Each detection must: Join an existing cluster OR start a new cluster
-    clusters = [
-        [person_det1, person_det2],
-        [person_det3],
-    ]
-    """
+    final = []
+    used = set()
 
-    for det in person_dets:
-        added_to_cluster = False
+    # Group detections by class
+    grouped = {}
 
+    for i, d in enumerate(detections):
+        if d["class"] in classes:
+            grouped.setdefault(d["class"], []).append((i, d))
+        else:
+            final.append(d)
+
+
+    for cls, items in grouped.items():
+
+        clusters = []
+
+        for idx, det in items:
+
+            if idx in used:
+                continue
+
+            used.add(idx)
+
+            cluster = [det]
+
+            for jdx, other in items:
+
+                if jdx in used:
+                    continue
+
+                if compute_iou(det["bbox"], other["bbox"]) >= iou_threshold:
+                    cluster.append(other)
+                    used.add(jdx)
+
+            clusters.append(cluster)
+
+        # Keep largest from each cluster
         for cluster in clusters:
-            # compare with representative box of cluster
-            iou = compute_iou(det["bbox"], cluster[0]["bbox"])
-            
-            #If this box overlaps enough with an existing cluster, it belongs to the same person
-            if iou >= iou_threshold:
-                cluster.append(det)
-                added_to_cluster = True
-                break
-        
-        #detection does not overlap with any known person → new person
-        if not added_to_cluster:
-            clusters.append([det])
 
-    # For each cluster, keep the largest box (best representative)
-    merged_persons = []
-    for cluster in clusters:
-        largest = max(
-            cluster,
-            key=lambda d: (d["bbox"][2] - d["bbox"][0]) * (d["bbox"][3] - d["bbox"][1])
-        )
-        merged_persons.append(largest)
+            best = max(
+                cluster,
+                key=lambda d: (d["bbox"][2] - d["bbox"][0]) *
+                              (d["bbox"][3] - d["bbox"][1])
+            )
 
-    return other_dets + merged_persons
+            final.append(best)
+
+    return final
+
 
 class ObjectDetector: #yolov8s.pt
-    def __init__(self, model_path="finalBest-v2.pt",confidence_threshold=0.5, book_confidence_threshold=0.3,mobile_confidence_threshold=0.5, audio_device_confidence_threshold=0.01):
-        self.model = YOLO(model_path)
-        self.confidence_threshold = confidence_threshold
+    def __init__(self, 
+                 person_model="yolov8s.pt",
+                 cheat_model="best_sofar_v3_25epoch.pt",
+
+                 default_conf=0.5, 
+                 person_conf=0.5,
+                 book_conf=0.25,
+                 phone_conf=0.25,
+                 audio_conf=0.3,
+                 ):
+
+        self.person_model = YOLO(person_model)
+        self.cheat_model = YOLO(cheat_model)
+
+        # Thresholds
+        self.default_conf = default_conf
+        self.person_conf = person_conf
         self.class_thresholds = {
-            "cell_phone": mobile_confidence_threshold,
-            "book": book_confidence_threshold,
-            "headphone": audio_device_confidence_threshold,
-            "earbud": audio_device_confidence_threshold,
-            "default": confidence_threshold
+            "cell_phone": phone_conf,
+            "book": book_conf,
+            "headphone": audio_conf,
+            "earbud": audio_conf,
         }
 
-        #COCO Classes Data set on which YOLO is trained : Common objects in Context
-        self.target_classes = {"person", "cell_phone", "book", "headphone", "earbud"}
+    def _run_model(self, model, frame, allowed_classes, default_conf):
+        detections = []
 
-    def detect(self, frame):
-        #Running the YOLO model on the current frame (verbose=False : supresses YOLO console logs)
-        results = self.model(frame, verbose=False)
-
-        detections=[]
-
-        #Appending detections to the list after properly structuring data
-        def appendDetections(class_name, confidence, box):                
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-            detections.append({
-                "class": class_name,
-                "confidence": confidence,
-                "bbox": (x1, y1, x2, y2)
-            })
+        results = model(frame, verbose=False)
 
         for r in results:
-            for box in r.boxes: 
-                cls_id = int(box.cls[0])-1
-                class_name = self.model.names[cls_id]
-                confidence = float(box.conf[0])
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                name = model.names[cls_id]
+                conf = float(box.conf[0])
 
-                #filtering so only the detections we are concerned with are returned
-                if class_name not in self.target_classes:
+                if name not in allowed_classes:
                     continue
-                
-                #get threshold based on class if not then default threshold
-                threshold = self.class_thresholds.get(class_name, self.confidence_threshold)
-                if confidence >= threshold:
-                    appendDetections(class_name, confidence, box)
+
+                threshold = self.class_thresholds.get(name, default_conf)
+
+                if conf < threshold:
+                    continue
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                detections.append({
+                    "class": name,
+                    "confidence": conf,
+                    "bbox": (x1, y1, x2, y2)
+                })
 
         return detections
-    
-    
+
+    def detect(self, frame):
+
+        # 1️⃣ Person detection
+        person_dets = self._run_model(
+            self.person_model,
+            frame,
+            {"person"},
+            self.person_conf
+        )
+
+        # 2️⃣ Cheating objects
+        cheat_dets = self._run_model(
+            self.cheat_model,
+            frame,
+            {"person", "cell_phone", "book", "headphone", "earbud"},
+            self.default_conf
+        )
+
+        # Merge
+        return person_dets + cheat_dets
