@@ -1,15 +1,12 @@
 import cv2
 
 from config import *
-from utils import AlertManager, alerts, draw_alerts, draw_detections
+from utils import AlertManager, draw_alerts, draw_detections
 from detectors import ObjectDetector, merge_by_class, HeadPoseDetector
 from core import AlertEngine, HeadTracker, LivenessDetector, ObjectTemporalTracker
 from collections import Counter
 
-DEBUG = True
-OBJECT_WINDOW = 15        # frames
-OBJECT_MIN_VOTES = 5      # must appear in 5 of last 15 frames
-OBJECT_RESET_FRAMES = 10  # absence needed to deactivate
+draw_objects = [True,True] #head , objects
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -36,14 +33,14 @@ def main():
 
     alert_manager = AlertManager()
     detector = ObjectDetector()
-    head_pose_detector = HeadPoseDetector()
+    head_pose_detector = HeadPoseDetector(DEBUG)
     object_tracker = ObjectTemporalTracker(
         window=OBJECT_WINDOW,
         min_votes=OBJECT_MIN_VOTES
     )
 
     alerts = AlertEngine(alert_manager, states, COOLDOWN_SECONDS, RESET_COOLDOWN_SECONDS)
-    tracker = HeadTracker(states, LOOKING_AWAY_THRESHOLD)
+    tracker = HeadTracker(states, LOOKING_AWAY_THRESHOLD, debug=DEBUG)
     liveness = LivenessDetector(FAKE_WINDOW, SAMPLE_INTERVAL, MIN_VARIANCE, NO_BLINK_TIMEOUT, LIVENESS_WEIGHTS)
 
 
@@ -59,11 +56,11 @@ def main():
 
         raw = detector.detect(frame)
 
-        detections = merge_by_class(
+        detections = (merge_by_class(
             raw,
             ["person", "earbud"],
             iou_threshold=0.5
-        )
+        ) if len(raw) > 1 else raw)
 
 
         (
@@ -79,49 +76,63 @@ def main():
             _,
             blinked,
             _
-
-        ) = head_pose_detector.detect(frame, draw=True)
+        ) = head_pose_detector.detect(frame, draw=draw_objects[0])
 
         #Liveness
         liveness.update(yaw, pitch, gaze, blinked)
-        fake, var_ = liveness.is_fake()
-        track_and_alert(frame, "fake_presence", fake) 
+        fake, _ = liveness.is_fake()
 
-        #Head Movement
-        track_and_alert(frame, "looking_away", looking_away)
-        track_and_alert(frame, "looking_down", looking_down)
-        track_and_alert(frame, "looking_up", looking_up)
-        track_and_alert(frame, "looking_side", looking_left or looking_right)
-        track_and_alert(frame, "partial_face", partial_face)
-        track_and_alert(frame, "face_hidden", (yaw == 0.0 and pitch == 0.0 and gaze == 0.0))
+        #Object Flags (single pass)
+        phone = book = headphone = earbud = False
+        people_count = 0
 
-        #Objects
-        class_counts = Counter(d["class"] for d in detections)
+        for d in detections:
+            cls = d["class"]
+            if cls == "person":
+                people_count += 1
+            elif cls == "cell_phone":
+                phone = True
+            elif cls == "book":
+                book = True
+            elif cls == "headphone":
+                headphone = True
+            elif cls == "earbud":
+                earbud = True
 
-        phone = class_counts["cell_phone"] > 0
-        book = class_counts["book"] > 0
-        headphone = class_counts["headphone"] > 0
-        earbud = class_counts["earbud"] > 0
-        people_count = class_counts["person"]
+        #Head Movement Conditions
+        face_hidden_condition = not (yaw or pitch or gaze) and people_count == 0
+        head_conditions = {
+            "looking_away": looking_away,
+            "looking_down": looking_down,
+            "looking_up": looking_up,
+            "looking_side": looking_left or looking_right,
+            "partial_face": partial_face,
+            "face_hidden": face_hidden_condition,
+            "fake_presence": fake
+        }
 
-        phone_stable = object_tracker.update("phone", phone)
-        alerts.trigger("phone", phone_stable)
+        for key, cond in head_conditions.items():
+            triggered = tracker.process(frame, key, cond)
+            alerts.trigger(key, triggered)
 
-        book_stable = object_tracker.update("book", book)
-        alerts.trigger("book", book_stable)
-
-        headphone_stable = object_tracker.update("headphone", headphone)
-        alerts.trigger("headphone", headphone_stable)
-
-        earbud_stable = object_tracker.update("earbud", earbud)
-        alerts.trigger("earbud", earbud_stable)
+        #Object Stability
+        object_flags = {
+            "phone": phone,
+            "book": book,
+            "headphone": headphone,
+            "earbud": earbud
+        }
+        for key, present in object_flags.items():
+            stable = object_tracker.update(key, present)
+            alerts.trigger(key, stable)
 
         alerts.trigger("multiple_people", people_count > 1)
-        alerts.trigger("no_person", people_count == 0)
+        # alerts.trigger("no_person", people_count == 0)
 
-        if DEBUG:
+        if DEBUG and draw_objects[1]:
             draw_detections(frame, detections)
             draw_alerts(frame, alert_manager.get_active_alerts())
+        
         cv2.imshow("AI Proctor", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):

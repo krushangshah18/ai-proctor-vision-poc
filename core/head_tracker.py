@@ -3,9 +3,10 @@ import cv2
 
 #handles Time based behavior
 class HeadTracker:
-    def __init__(self, states, threshold):
+    def __init__(self, states, threshold, debug=False):
         self.states = states
         self.threshold = threshold
+        self.DEBUG = debug
 
     def process(self, frame, key, condition):
         ret_Val = False
@@ -26,7 +27,7 @@ class HeadTracker:
             this_state["start_time"] = None
             this_state["active"] = False
 
-        if this_state["start_time"]:
+        if self.DEBUG and this_state["start_time"]:
             elapsed = now - this_state["start_time"]
             cv2.putText(
                     frame,

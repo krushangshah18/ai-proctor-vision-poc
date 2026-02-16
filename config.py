@@ -1,3 +1,5 @@
+DEBUG = True
+
 COOLDOWN_SECONDS = 3
 RESET_COOLDOWN_SECONDS = 1
 LOOKING_AWAY_THRESHOLD = 1.5
@@ -12,3 +14,6 @@ LIVENESS_WEIGHTS = {
     "gaze": 0.45,
     "pitch": 0.10,
 }
+
+OBJECT_WINDOW = 15        # frames
+OBJECT_MIN_VOTES = 5      # must appear in 5 of last 15 frames
