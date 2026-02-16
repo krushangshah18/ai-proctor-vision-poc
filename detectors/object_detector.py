@@ -88,13 +88,13 @@ def merge_by_class(detections, classes, iou_threshold=0.5):
 class ObjectDetector: #yolov8s.pt
     def __init__(self, 
                  person_model="yolov8s.pt",
-                 cheat_model="best_sofar_v3_25epoch.pt",
+                 cheat_model="YOLO_fineTune_v3.pt",
 
                  default_conf=0.5, 
                  person_conf=0.5,
                  book_conf=0.25,
                  phone_conf=0.25,
-                 audio_conf=0.3,
+                 audio_conf=0.4,
                  ):
 
         self.person_model = YOLO(person_model)

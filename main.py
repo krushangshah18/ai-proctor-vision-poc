@@ -1,16 +1,19 @@
 import cv2
 
 from config import *
-from utils import AlertManager, draw_alerts, draw_detections
+from utils import AlertManager, alerts, draw_alerts, draw_detections
 from detectors import ObjectDetector, merge_by_class, HeadPoseDetector
-from core import AlertEngine, HeadTracker, LivenessDetector
+from core import AlertEngine, HeadTracker, LivenessDetector, ObjectTemporalTracker
 from collections import Counter
 
 DEBUG = True
-
+OBJECT_WINDOW = 15        # frames
+OBJECT_MIN_VOTES = 5      # must appear in 5 of last 15 frames
+OBJECT_RESET_FRAMES = 10  # absence needed to deactivate
 
 def main():
     cap = cv2.VideoCapture(0)
+
     if not cap.isOpened():
         raise RuntimeError("Could Not open WebCam")
 
@@ -34,6 +37,10 @@ def main():
     alert_manager = AlertManager()
     detector = ObjectDetector()
     head_pose_detector = HeadPoseDetector()
+    object_tracker = ObjectTemporalTracker(
+        window=OBJECT_WINDOW,
+        min_votes=OBJECT_MIN_VOTES
+    )
 
     alerts = AlertEngine(alert_manager, states, COOLDOWN_SECONDS, RESET_COOLDOWN_SECONDS)
     tracker = HeadTracker(states, LOOKING_AWAY_THRESHOLD)
@@ -97,17 +104,25 @@ def main():
         earbud = class_counts["earbud"] > 0
         people_count = class_counts["person"]
 
-        alerts.trigger("phone", phone)
-        alerts.trigger("book", book)
-        alerts.trigger("headphone", headphone)
-        alerts.trigger("earbud", earbud)
+        phone_stable = object_tracker.update("phone", phone)
+        alerts.trigger("phone", phone_stable)
+
+        book_stable = object_tracker.update("book", book)
+        alerts.trigger("book", book_stable)
+
+        headphone_stable = object_tracker.update("headphone", headphone)
+        alerts.trigger("headphone", headphone_stable)
+
+        earbud_stable = object_tracker.update("earbud", earbud)
+        alerts.trigger("earbud", earbud_stable)
+
         alerts.trigger("multiple_people", people_count > 1)
         alerts.trigger("no_person", people_count == 0)
 
         if DEBUG:
             draw_detections(frame, detections)
             draw_alerts(frame, alert_manager.get_active_alerts())
-            cv2.imshow("AI Proctor", frame)
+        cv2.imshow("AI Proctor", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break 
