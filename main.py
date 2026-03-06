@@ -4,7 +4,6 @@ from config import *
 from utils import AlertManager, draw_alerts, draw_detections
 from detectors import ObjectDetector, merge_by_class, HeadPoseDetector
 from core import AlertEngine, HeadTracker, LivenessDetector, ObjectTemporalTracker
-from collections import Counter
 
 draw_objects = [True,True] #head , objects
 

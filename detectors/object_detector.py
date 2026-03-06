@@ -88,13 +88,14 @@ def merge_by_class(detections, classes, iou_threshold=0.5):
 class ObjectDetector:
     def __init__(self, 
                  person_model="yolov8s.pt",
-                 cheat_model="YOLO_fineTune_v3.pt",
+                #  cheat_model="cheat.pt",
+                 cheat_model="bestSoFarV5.pt",
 
                  default_conf=0.5, 
-                 person_conf=0.5,
-                 book_conf=0.4,
-                 phone_conf=0.6,
-                 audio_conf=0.5,
+                 person_conf=0.4,
+                 book_conf=0.65,
+                 phone_conf=0.45,
+                 audio_conf=0.1,
                  ):
 
         self.person_model = YOLO(person_model)
@@ -141,15 +142,15 @@ class ObjectDetector:
 
     def detect(self, frame):
 
-        # 1️⃣ Person detection
-        person_dets = self._run_model(
-            self.person_model,
-            frame,
-            {"person"},
-            self.person_conf
-        )
+        # Person detection
+        # person_dets = self._run_model(
+        #     self.person_model,
+        #     frame,
+        #     {"person"},
+        #     self.person_conf
+        # )
 
-        # 2️⃣ Cheating objects
+        # Cheating objects
         cheat_dets = self._run_model(
             self.cheat_model,
             frame,
@@ -158,4 +159,5 @@ class ObjectDetector:
         )
 
         # Merge
-        return person_dets + cheat_dets
+        # return person_dets + cheat_dets
+        return cheat_dets
