@@ -22,12 +22,20 @@ def main():
     "earbud" : {"active":False, "last_alert":0, "message":"ALERT: Earbud detected"},
     
     "looking_away": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Candidate is not facing the screen"},
+    
     "looking_down": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Candidate is looking down for extended duration"},
+
     "looking_up": {"active": False, "last_alert": 0, "start_time": None, "message":"ALERT: Candidate is looking up for extended duration"},
+
     "looking_side": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Candidate is looking away from the screen (eye gaze detected)"},
+
     "face_hidden": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face not clearly visible (possible obstruction)"},
+
     "partial_face": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Face appears too small (candidate may be too far from camera)"},
-    "fake_presence": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence detected (no eye blink / low movement)"}
+
+    "fake_presence": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible fake presence detected (no eye blink / low movement)"},
+
+    "speaking": {"active": False, "last_alert": 0, "start_time": None, "message": "ALERT: Possible Speaking Detected"}
     }
 
     alert_manager = AlertManager()
@@ -74,7 +82,8 @@ def main():
             gaze,
             _,
             blinked,
-            _
+            _,
+            speaking
         ) = head_pose_detector.detect(frame, draw=draw_objects[0])
 
         #Liveness
@@ -107,7 +116,8 @@ def main():
             "looking_side": looking_left or looking_right,
             "partial_face": partial_face,
             "face_hidden": face_hidden_condition,
-            "fake_presence": fake
+            "fake_presence": fake,
+            "speaking": speaking
         }
 
         for key, cond in head_conditions.items():
