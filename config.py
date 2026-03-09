@@ -17,3 +17,8 @@ LIVENESS_WEIGHTS = {
 
 OBJECT_WINDOW = 15        # frames
 OBJECT_MIN_VOTES = 5      # must appear in 5 of last 15 frames
+
+# Audio proctoring
+AUDIO_SR = 16000          # sample rate (Hz)
+AUDIO_CHUNK = 512         # samples per chunk (~32ms @ 16kHz)
+ENROLLMENT_WAV = "enrollment.wav"

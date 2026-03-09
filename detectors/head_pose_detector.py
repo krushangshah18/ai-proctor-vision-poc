@@ -61,15 +61,22 @@ class HeadPoseDetector:
         self.RIGHT_MOUTH = 291
 
         # Speaking detection buffers
-        self.mar_history = deque(maxlen=20)
+        self.mar_history = deque(maxlen=20)   # main window (~667ms @ 30fps)
         self.mar_velocity = deque(maxlen=20)
+        self.recent_velocity = deque(maxlen=6)  # short window for fast stop detection
 
         self.prev_mar = None
 
-        # thresholds (empirically stable)
-        self.MAR_VAR_THRESHOLD = 0.0008
-        self.MAR_VEL_THRESHOLD = 0.015
-        self.MAR_OSC_THRESHOLD = 6
+        # thresholds
+        self.MAR_VAR_THRESHOLD = 0.0006
+        self.MAR_VEL_THRESHOLD = 0.012
+        self.MAR_OSC_THRESHOLD = 4
+        self.MAR_YAWN_THRESHOLD = 0.45   # mean MAR above this → yawn, not speech
+        self.SILENCE_VEL_THRESHOLD = 0.005  # recent velocity below this → definitely silent
+
+        # hold state: bridge brief inter-word gaps (~133ms @ 30fps)
+        self.SPEAKING_HOLD_FRAMES = 4
+        self._speaking_hold = 0
     
 
     # Utility Functions
@@ -212,9 +219,10 @@ class HeadPoseDetector:
             velocity = abs(mar - self.prev_mar)
 
         self.mar_velocity.append(velocity)
+        self.recent_velocity.append(velocity)
         self.prev_mar = mar
 
-        speaking = False
+        raw_speaking = False
         variance = 0
         vel_mean = 0
         zero_crossings = 0
@@ -223,23 +231,36 @@ class HeadPoseDetector:
 
             mar_arr = np.array(self.mar_history)
 
-            # 1️⃣ mouth oscillation strength
+            # 1. mouth oscillation strength
             variance = np.var(mar_arr)
 
-            # 2️⃣ lip velocity
+            # 2. lip velocity
             vel_mean = np.mean(self.mar_velocity)
 
-            # 3️⃣ oscillation count
+            # 3. oscillation count
             mean_mar = np.mean(mar_arr)
             centered = mar_arr - mean_mar
             zero_crossings = np.sum(np.diff(np.sign(centered)) != 0)
 
-            # final speaking decision
-            speaking = (
-                variance > self.MAR_VAR_THRESHOLD and
-                vel_mean > self.MAR_VEL_THRESHOLD and
-                zero_crossings >= self.MAR_OSC_THRESHOLD
-            )
+            cond_var = variance > self.MAR_VAR_THRESHOLD
+            cond_vel = vel_mean > self.MAR_VEL_THRESHOLD
+            cond_osc = zero_crossings >= self.MAR_OSC_THRESHOLD
+            # yawn guard: mouth wide open (high mean MAR) → not speech
+            cond_not_yawn = mean_mar < self.MAR_YAWN_THRESHOLD
+
+            raw_speaking = cond_not_yawn and cond_var and (cond_vel or cond_osc)
+
+        # fast stop: if recent lip velocity has gone silent, drop hold immediately
+        if len(self.recent_velocity) == self.recent_velocity.maxlen:
+            if np.mean(self.recent_velocity) < self.SILENCE_VEL_THRESHOLD:
+                self._speaking_hold = 0
+
+        if raw_speaking:
+            self._speaking_hold = self.SPEAKING_HOLD_FRAMES
+        elif self._speaking_hold > 0:
+            self._speaking_hold -= 1
+
+        speaking = raw_speaking or self._speaking_hold > 0
 
         if draw and self.DEBUG:
             #Nose

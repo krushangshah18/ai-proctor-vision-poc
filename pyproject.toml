@@ -9,4 +9,11 @@ dependencies = [
     "numpy<2.0",
     "opencv-python<4.10",
     "ultralytics>=8.4.7",
+    "resemblyzer",
+    "silero-vad",
+    "torch",
+    "scipy",
+    "sounddevice",
+    "setuptools>=82.0.0",
+    "noisereduce",
 ]

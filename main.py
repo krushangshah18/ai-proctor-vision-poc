@@ -1,11 +1,28 @@
 import cv2
+import queue
+import threading
+import time
+
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+import noisereduce as nr
 
 from config import *
 from utils import AlertManager, draw_alerts, draw_detections
 from detectors import ObjectDetector, merge_by_class, HeadPoseDetector
 from core import AlertEngine, HeadTracker, LivenessDetector, ObjectTemporalTracker
+from core.audio_proctoring import ProctorSession, CheatType
 
 draw_objects = [True,True] #head , objects
+
+_AUDIO_EVENT_LABELS = {
+    CheatType.IMPERSONATION:  "ALERT [AUDIO]: Voice impersonation detected",
+    CheatType.GHOST_VOICE:    "ALERT [AUDIO]: Ghost voice / pre-recorded playback",
+    CheatType.EXTRA_SPEAKER:  "ALERT [AUDIO]: Extra speaker detected",
+    CheatType.VOICE_MISMATCH: "ALERT [AUDIO]: Voice mismatch with enrolled student",
+}
+
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -50,6 +67,76 @@ def main():
     tracker = HeadTracker(states, LOOKING_AWAY_THRESHOLD, debug=DEBUG)
     liveness = LivenessDetector(FAKE_WINDOW, SAMPLE_INTERVAL, MIN_VARIANCE, NO_BLINK_TIMEOUT, LIVENESS_WEIGHTS)
 
+    # ── Audio proctoring setup ────────────────────────────────────────────────
+    session = ProctorSession(sample_rate=AUDIO_SR)
+    audio_chunk_q: queue.Queue = queue.Queue(maxsize=100)
+    audio_event_q: queue.Queue = queue.Queue()
+    stop_audio = threading.Event()
+    recorded_chunks: list = []
+
+    # Noise profile: accumulate first 0.5s of mic audio before any speech starts
+    _NOISE_PROFILE_CHUNKS = int(0.5 * AUDIO_SR / AUDIO_CHUNK)  # ~16 chunks
+    _noise_buf: list = []
+    _noise_profile: np.ndarray | None = None
+
+    def _denoise(chunk: np.ndarray) -> np.ndarray:
+        nonlocal _noise_profile
+        if _noise_profile is None:
+            return chunk
+        return nr.reduce_noise(y=chunk, sr=AUDIO_SR,
+                               y_noise=_noise_profile,
+                               stationary=True, prop_decrease=0.85).astype(np.float32)
+
+    def _audio_sd_callback(indata, frames, time_info, status):
+        try:
+            audio_chunk_q.put_nowait(indata[:, 0].copy())
+        except queue.Full:
+            pass  # drop on overflow rather than block the audio callback
+
+    def _audio_worker():
+        nonlocal _noise_profile
+        while not stop_audio.is_set():
+            try:
+                chunk = audio_chunk_q.get(timeout=0.1)
+
+                # build noise profile from the first few silent chunks
+                if _noise_profile is None:
+                    _noise_buf.append(chunk)
+                    if len(_noise_buf) >= _NOISE_PROFILE_CHUNKS:
+                        _noise_profile = np.concatenate(_noise_buf)
+                        print(f"[Audio] Noise profile captured ({len(_noise_profile)/AUDIO_SR:.2f}s)")
+                    recorded_chunks.append(chunk)
+                    continue  # don't push to session until profile is ready
+
+                clean = _denoise(chunk)
+                recorded_chunks.append(clean)
+                events = session.push(clean)
+                for ev in events:
+                    audio_event_q.put(ev)
+            except queue.Empty:
+                continue
+
+    # ── Enrollment from wav file ──────────────────────────────────────────────
+    try:
+        enroll_audio, enroll_sr = sf.read(ENROLLMENT_WAV, dtype="float32")
+        if enroll_audio.ndim > 1:
+            enroll_audio = enroll_audio[:, 0]
+        # Denoise enrollment audio so its embedding lives in the same clean space
+        enroll_audio = nr.reduce_noise(y=enroll_audio, sr=enroll_sr,
+                                       stationary=True, prop_decrease=0.85).astype(np.float32)
+        session.enroll(enroll_audio, sr=enroll_sr)
+        print(f"[Audio] Enrolled from {ENROLLMENT_WAV} ({len(enroll_audio) / enroll_sr:.1f}s @ {enroll_sr}Hz)")
+    except FileNotFoundError:
+        print(f"[Audio] {ENROLLMENT_WAV} not found — audio proctoring disabled")
+    except ValueError as e:
+        print(f"[Audio] Enrollment failed: {e}")
+
+    # ── Start audio stream and worker thread ──────────────────────────────────
+    audio_stream = sd.InputStream(samplerate=AUDIO_SR, channels=1, dtype="float32",
+                                  blocksize=AUDIO_CHUNK, callback=_audio_sd_callback)
+    audio_stream.start()
+    audio_thread = threading.Thread(target=_audio_worker, daemon=True)
+    audio_thread.start()
 
     def track_and_alert(frame, key, condition):
         triggered = tracker.process(frame, key, condition)
@@ -89,6 +176,16 @@ def main():
         #Liveness
         liveness.update(yaw, pitch, gaze, blinked)
         fake, _ = liveness.is_fake()
+
+        # Audio: push current lip state and drain any cheat events
+        session.update_lip_activity(speaking)
+        while not audio_event_q.empty():
+            try:
+                ev = audio_event_q.get_nowait()
+                label = _AUDIO_EVENT_LABELS.get(ev.event_type, f"ALERT [AUDIO]: {ev.event_type.name}")
+                alert_manager.add_alert(f"{label} ({ev.confidence:.0%})")
+            except queue.Empty:
+                break
 
         #Object Flags (single pass)
         phone = book = headphone = earbud = False
@@ -147,6 +244,15 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break 
     
+    stop_audio.set()
+    audio_stream.stop()
+    audio_stream.close()
+
+    if recorded_chunks:
+        recording = np.concatenate(recorded_chunks)
+        sf.write("session_recording.wav", recording, AUDIO_SR)
+        print(f"[Audio] Session saved → session_recording.wav ({len(recording) / AUDIO_SR:.1f}s)")
+
     cap.release()
     cv2.destroyAllWindows()
 
