@@ -89,7 +89,7 @@ class ObjectDetector:
     def __init__(self, 
                  person_model="yolov8s.pt",
                 #  cheat_model="cheat.pt",
-                 cheat_model="bestSoFarV5.pt",
+                 cheat_model="finalBestV5.pt",
 
                  default_conf=0.5, 
                  person_conf=0.4,
