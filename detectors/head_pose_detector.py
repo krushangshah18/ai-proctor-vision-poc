@@ -2,6 +2,8 @@ import cv2
 import math
 import mediapipe as mp
 
+from collections import deque
+import numpy as np
 class HeadPoseDetector:
     def __init__(self, debug=False):
         self.face_mesh = mp.solutions.face_mesh.FaceMesh( #Creates the actual face detector.
@@ -51,6 +53,23 @@ class HeadPoseDetector:
         self.LOOK_UP_PITCH = -0.1
         self.GAZE_LEFT = -0.15
         self.GAZE_RIGHT = 0.15
+
+        # Lips
+        self.UPPER_LIP = 13
+        self.LOWER_LIP = 14
+        self.LEFT_MOUTH = 61
+        self.RIGHT_MOUTH = 291
+
+        # Speaking detection buffers
+        self.mar_history = deque(maxlen=20)
+        self.mar_velocity = deque(maxlen=20)
+
+        self.prev_mar = None
+
+        # thresholds (empirically stable)
+        self.MAR_VAR_THRESHOLD = 0.0008
+        self.MAR_VEL_THRESHOLD = 0.015
+        self.MAR_OSC_THRESHOLD = 6
     
 
     # Utility Functions
@@ -79,7 +98,7 @@ class HeadPoseDetector:
         #no face detected
         if not results.multi_face_landmarks:
             self.blink_counter = 0
-            return (False, False, False, False, False, False,0.0, 0.0, 0.0,0,False,0)
+            return (False, False, False, False, False, False,0.0, 0.0, 0.0,0,False,0, False)
         
         """
         multi_face_landmarks → list of faces
@@ -166,6 +185,62 @@ class HeadPoseDetector:
 
             self.blink_counter = 0
 
+        #lips
+        upper_lip = (int(landmarks[self.UPPER_LIP].x * w),
+             int(landmarks[self.UPPER_LIP].y * h))
+
+        lower_lip = (int(landmarks[self.LOWER_LIP].x * w),
+                    int(landmarks[self.LOWER_LIP].y * h))
+
+        left_mouth = (int(landmarks[self.LEFT_MOUTH].x * w),
+                    int(landmarks[self.LEFT_MOUTH].y * h))
+
+        right_mouth = (int(landmarks[self.RIGHT_MOUTH].x * w),
+                    int(landmarks[self.RIGHT_MOUTH].y * h))
+
+        vertical = self._dist(upper_lip, lower_lip)
+        horizontal = self._dist(left_mouth, right_mouth)
+
+        mar = vertical / (horizontal + 1e-6)
+        # ---------- SPEAKING DETECTION ----------
+
+        self.mar_history.append(mar)
+
+        if self.prev_mar is None:
+            velocity = 0
+        else:
+            velocity = abs(mar - self.prev_mar)
+
+        self.mar_velocity.append(velocity)
+        self.prev_mar = mar
+
+        speaking = False
+        variance = 0
+        vel_mean = 0
+        zero_crossings = 0
+
+        if len(self.mar_history) == self.mar_history.maxlen:
+
+            mar_arr = np.array(self.mar_history)
+
+            # 1️⃣ mouth oscillation strength
+            variance = np.var(mar_arr)
+
+            # 2️⃣ lip velocity
+            vel_mean = np.mean(self.mar_velocity)
+
+            # 3️⃣ oscillation count
+            mean_mar = np.mean(mar_arr)
+            centered = mar_arr - mean_mar
+            zero_crossings = np.sum(np.diff(np.sign(centered)) != 0)
+
+            # final speaking decision
+            speaking = (
+                variance > self.MAR_VAR_THRESHOLD and
+                vel_mean > self.MAR_VEL_THRESHOLD and
+                zero_crossings >= self.MAR_OSC_THRESHOLD
+            )
+
         if draw and self.DEBUG:
             #Nose
             cv2.circle(frame, nose, 4, (0,255,255), -1)
@@ -217,6 +292,21 @@ class HeadPoseDetector:
                         (20,170), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255,0,255), 2)
 
+            cv2.putText(frame, f"MAR:{mar:.2f}",
+                        (20,200), cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
+
+            cv2.putText(frame, f"Var:{variance:.4f}",
+                        (20,220), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+
+            cv2.putText(frame, f"Vel:{vel_mean:.3f}",
+                        (20,240), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+
+            cv2.putText(frame, f"Osc:{zero_crossings}",
+                        (20,260), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+
+            cv2.putText(frame, f"Speaking:{speaking}",
+                        (20,280), cv2.FONT_HERSHEY_SIMPLEX,0.7,
+                        (0,0,255) if speaking else (0,255,0),2)
 
         return (
             looking_away,
@@ -230,5 +320,6 @@ class HeadPoseDetector:
             gaze_ratio,
             ear,
             blinked,
-            self.total_blinks
+            self.total_blinks,
+            speaking
         )
