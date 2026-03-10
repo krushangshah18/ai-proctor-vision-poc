@@ -9,40 +9,11 @@ Lazy-loads VoiceEncoder on first call so session startup is instant.
 """
 from __future__ import annotations
 
-import sys
-import types
-
 import numpy as np
-
-# resemblyzer.audio imports webrtcvad only for trim_long_silences / preprocess_wav.
-# We replace preprocess_wav with a simple normalizer below, so we just need
-# the import to succeed without a compiled webrtcvad extension.
-if "webrtcvad" not in sys.modules:
-    _mock = types.ModuleType("webrtcvad")
-
-    class _Vad:  # noqa: D101
-        def __init__(self, *a, **kw): pass
-        def is_speech(self, *a, **kw): return True
-
-    _mock.Vad = _Vad
-    sys.modules["webrtcvad"] = _mock
 
 _EMBED_DIM      = 256
 _MIN_AUDIO_S    = 0.5    # Resemblyzer minimum for a stable embedding
 _ENROLL_CHUNK_S = 3.0    # split enrollment into N-second pieces
-_TARGET_SR      = 16000  # VoiceEncoder expects 16 kHz
-
-
-def _preprocess(audio: np.ndarray, sr: int) -> np.ndarray:
-    """Resample to 16 kHz and peak-normalise. No webrtcvad needed."""
-    audio = audio.astype(np.float32)
-    if sr != _TARGET_SR:
-        from scipy.signal import resample as _resample
-        audio = _resample(audio, int(len(audio) * _TARGET_SR / sr))
-    peak = np.abs(audio).max()
-    if peak > 1e-8:
-        audio /= peak
-    return audio
 
 
 class Embedder:
@@ -79,13 +50,14 @@ class Embedder:
         or None if the segment is too short / silent.
         """
         self._ensure_loaded()
+        from resemblyzer import preprocess_wav
 
         if len(audio) / sr < _MIN_AUDIO_S:
             return None
 
         try:
-            wav = _preprocess(audio, sr)
-            if len(wav) < int(_MIN_AUDIO_S * _TARGET_SR):
+            wav = preprocess_wav(audio, source_sr=sr)
+            if len(wav) < int(_MIN_AUDIO_S * 16000):
                 return None
             emb = self._encoder.embed_utterance(wav)
             return emb.astype(np.float32)
@@ -113,7 +85,6 @@ class Embedder:
             if emb is not None:
                 embeds.append(emb)
 
-        # Also try the whole clip if it's < 1 chunk
         if not embeds:
             emb = self.embed(audio, sr)
             if emb is not None:

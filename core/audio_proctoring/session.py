@@ -39,7 +39,7 @@ from .vad_bridge    import VADBridge
 # ── Tuneable constants ────────────────────────────────────────────────────────
 _SR              = 16000
 _CHUNK_SAMPLES   = 512       # 32ms — matches Silero requirement
-_EMBED_VOICED_S  = 2.0       # accumulate this many seconds of voiced audio before embedding
+_EMBED_VOICED_S  = 1.5       # accumulate this many seconds of voiced audio before embedding
 _EMBED_VOICED_N  = int(_EMBED_VOICED_S * _SR)
 _BUFFER_S        = 30.0      # rolling evidence buffer duration
 
@@ -151,9 +151,6 @@ class ProctorSession:
         list[CheatEvent] — empty most of the time; each event carries
                            .audio_proof (WAV bytes) ready for backend upload.
         """
-        if self._start_time is None:
-            self._start_time = time.monotonic()
-
         chunk = ensure_float32_mono(audio_chunk)
 
         # 1. Feed rolling evidence buffer
@@ -191,7 +188,9 @@ class ProctorSession:
         events: list[CheatEvent] = []
 
         if self._profile is not None:
-            ts = time.monotonic() - self._start_time
+            # Use audio-position time so behaviour is identical whether
+            # processing live (real-time) or offline (faster-than-real-time).
+            ts = self._chunk_count * _CHUNK_SAMPLES / self._sr
             inputs = FusionInputs(
                 vad_active   = speaking,
                 lip_active   = lip_now,
@@ -199,7 +198,7 @@ class ProctorSession:
                 n_speakers   = self._tracker.n_speakers,
                 timestamp_s  = ts,
             )
-            ev = self._fusion.evaluate(inputs, self._buffer)
+            ev = self._fusion.evaluate(self._buffer, inputs)
             if ev is not None:
                 self._events.append(ev)
                 events.append(ev)

@@ -40,8 +40,9 @@ _COOLDOWN_CYCLES: dict[CheatType, int] = {
 # Avoids false IMPERSONATION flags during the first ~2s when no embedding exists.
 _MIN_SCORE_FOR_VOICE_FLAG = 0.05
 
-# Warmup period before EXTRA_SPEAKER can fire — embeddings are unreliable early on.
-_EXTRA_SPEAKER_WARMUP_S = 20.0
+# Events below this confidence are suppressed — borderline detections
+# (e.g. whisper audio producing a weak embedding) create more noise than signal.
+_MIN_CONFIDENCE = 0.40
 
 
 class CrossModalFusion:
@@ -55,8 +56,8 @@ class CrossModalFusion:
 
     def evaluate(
         self,
-        inputs: FusionInputs,
         buffer: RollingAudioBuffer,
+        inputs: FusionInputs,
     ) -> CheatEvent | None:
         """
         Run the decision tree for one evaluation cycle.
@@ -71,6 +72,11 @@ class CrossModalFusion:
         if event is None:
             return None
 
+        # Suppress weak detections before touching the cooldown
+        confidence = self._confidence(event, inputs)
+        if confidence < _MIN_CONFIDENCE:
+            return None
+
         # Check cooldown
         if self._cooldowns[event] > 0:
             return None
@@ -80,8 +86,6 @@ class CrossModalFusion:
 
         # Extract audio proof from buffer
         proof = buffer.to_wav_bytes()
-
-        confidence = self._confidence(event, inputs)
         return CheatEvent(
             event_type   = event,
             confidence   = round(confidence, 3),
@@ -116,12 +120,14 @@ class CrossModalFusion:
                 and inp.verify_score >= THRESH_MATCH):
             return CheatType.GHOST_VOICE
 
-        # 3. EXTRA_SPEAKER — two or more confirmed distinct voices detected in session
-        #    Requires warmup period to pass so early noisy embeddings don't misfire.
-        if (inp.vad_active
-                and inp.n_speakers >= 2
-                and inp.timestamp_s >= _EXTRA_SPEAKER_WARMUP_S):
-            return CheatType.EXTRA_SPEAKER
+        # 3. EXTRA_SPEAKER — two or more distinct voices detected in session
+        #    Require higher verify_score when the signal is weaker (fewer extra speakers).
+        #    conf=70% (n=2): enrolled speaker must still score ≥ 0.50
+        #    conf≥80% (n≥3): enrolled speaker must still score ≥ 0.40
+        if inp.vad_active and inp.n_speakers >= 2:
+            min_score = 0.50 if inp.n_speakers == 2 else 0.40
+            if inp.verify_score >= min_score:
+                return CheatType.EXTRA_SPEAKER
 
         # 4. VOICE_MISMATCH — speaking, but voice doesn't match enrollment
         if (inp.vad_active
@@ -136,12 +142,10 @@ class CrossModalFusion:
     @staticmethod
     def _confidence(event: CheatType, inp: FusionInputs) -> float:
         if event == CheatType.IMPERSONATION:
-            # Stronger signal when verify_score is very low and lips clearly still
             return min(1.0, (THRESH_UNCERTAIN - inp.verify_score) / THRESH_UNCERTAIN
                        + (0.3 if not inp.lip_active else 0.0))
 
         if event == CheatType.GHOST_VOICE:
-            # High confidence when both voice matches AND lips are still
             return min(1.0, inp.verify_score)
 
         if event == CheatType.EXTRA_SPEAKER:

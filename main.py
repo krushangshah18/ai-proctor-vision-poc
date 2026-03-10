@@ -218,7 +218,8 @@ def main():
         }
 
         for key, cond in head_conditions.items():
-            triggered = tracker.process(frame, key, cond)
+            threshold = 2.5 if key == "speaking" else None
+            triggered = tracker.process(frame, key, cond, threshold=threshold)
             alerts.trigger(key, triggered)
 
         #Object Stability

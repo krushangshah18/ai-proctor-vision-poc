@@ -8,11 +8,12 @@ class HeadTracker:
         self.threshold = threshold
         self.DEBUG = debug
 
-    def process(self, frame, key, condition):
+    def process(self, frame, key, condition, threshold=None):
         ret_Val = False
         now = time.time()
         this_state = self.states[key]
         label = key.replace("_", " ").title()
+        active_threshold = threshold if threshold is not None else self.threshold
 
         if condition:
 
@@ -21,7 +22,7 @@ class HeadTracker:
 
             duration = now - this_state["start_time"]
 
-            if duration >= self.threshold:
+            if duration >= active_threshold:
                 ret_Val = True
         else:
             this_state["start_time"] = None
