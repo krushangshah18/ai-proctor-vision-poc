@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
-_MERGE_THRESHOLD = 0.75   # cosine sim above which two embeddings = same speaker
+_MERGE_THRESHOLD    = 0.70   # cosine sim above which two embeddings = same speaker
+_MIN_CLUSTER_FRAMES = 3     # cluster must have this many utterances to count as a real speaker
 
 
 class OnlineSpeakerTracker:
@@ -21,8 +22,10 @@ class OnlineSpeakerTracker:
     Centroids are updated with a running mean after each assignment.
     """
 
-    def __init__(self, merge_threshold: float = _MERGE_THRESHOLD):
-        self._threshold  = merge_threshold
+    def __init__(self, merge_threshold: float = _MERGE_THRESHOLD,
+                 min_cluster_frames: int = _MIN_CLUSTER_FRAMES):
+        self._threshold         = merge_threshold
+        self._min_cluster_frames = min_cluster_frames
         self._centroids: list[np.ndarray] = []   # L2-normalised
         self._counts:    list[int]         = []   # frames assigned to each cluster
 
@@ -63,8 +66,8 @@ class OnlineSpeakerTracker:
 
     @property
     def n_speakers(self) -> int:
-        """Number of distinct speaker clusters seen so far."""
-        return len(self._centroids)
+        """Number of distinct speaker clusters with enough evidence."""
+        return sum(1 for c in self._counts if c >= self._min_cluster_frames)
 
     def verify_score(self, enrolled_centroid: np.ndarray) -> float:
         """

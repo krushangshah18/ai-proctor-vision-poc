@@ -57,7 +57,7 @@ class ProctorSession:
         sample_rate: int = _SR,
         buffer_seconds: float = _BUFFER_S,
         vad_threshold: float = 0.45,
-        speaker_merge_threshold: float = 0.75,
+        speaker_merge_threshold: float = 0.70,
     ):
         self._sr = sample_rate
 

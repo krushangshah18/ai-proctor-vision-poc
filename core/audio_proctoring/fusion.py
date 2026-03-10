@@ -40,6 +40,9 @@ _COOLDOWN_CYCLES: dict[CheatType, int] = {
 # Avoids false IMPERSONATION flags during the first ~2s when no embedding exists.
 _MIN_SCORE_FOR_VOICE_FLAG = 0.05
 
+# Warmup period before EXTRA_SPEAKER can fire — embeddings are unreliable early on.
+_EXTRA_SPEAKER_WARMUP_S = 20.0
+
 
 class CrossModalFusion:
     """
@@ -113,8 +116,11 @@ class CrossModalFusion:
                 and inp.verify_score >= THRESH_MATCH):
             return CheatType.GHOST_VOICE
 
-        # 3. EXTRA_SPEAKER — two or more distinct voices detected in session
-        if inp.vad_active and inp.n_speakers >= 2:
+        # 3. EXTRA_SPEAKER — two or more confirmed distinct voices detected in session
+        #    Requires warmup period to pass so early noisy embeddings don't misfire.
+        if (inp.vad_active
+                and inp.n_speakers >= 2
+                and inp.timestamp_s >= _EXTRA_SPEAKER_WARMUP_S):
             return CheatType.EXTRA_SPEAKER
 
         # 4. VOICE_MISMATCH — speaking, but voice doesn't match enrollment
