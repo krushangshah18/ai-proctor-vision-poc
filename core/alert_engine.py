@@ -41,6 +41,25 @@ _WARN_FIRST_N: dict[str, int] = {
     "no_person"      : 0,
 }
 
+# Warn cooldowns: minimum seconds between consecutive soft warnings for the same key.
+# Prevents warning spam when a condition flickers (e.g. speaking oscillating on/off).
+_WARN_COOLDOWNS: dict[str, float] = {
+    "speaking"       : 15,
+    "fake_presence"  : 15,
+    "looking_away"   : 10,
+    "looking_down"   : 10,
+    "looking_up"     : 10,
+    "looking_side"   : 10,
+    "partial_face"   : 10,
+    "face_hidden"    :  8,
+    "phone"          :  5,
+    "multiple_people":  5,
+    "no_person"      :  5,
+    "book"           :  5,
+    "headphone"      :  5,
+    "earbud"         :  5,
+}
+
 # API-alert cooldowns: minimum seconds between consecutive API alerts for the same key.
 # Much longer than risk-scoring cooldowns — prevents spam while score still accumulates.
 _API_COOLDOWNS: dict[str, float] = {
@@ -74,6 +93,9 @@ class AlertEngine:
 
         # API-alert cooldowns: key → earliest wall-time for next API alert
         self._api_cooldown_until: dict[str, float] = {}
+
+        # Warn cooldowns: key → earliest wall-time for next soft warning
+        self._warn_cooldown_until: dict[str, float] = {}
 
         # Whether we have already shown the soft warning in the current active period.
         # Resets on each rising edge (is_new_occurrence).
@@ -119,26 +141,30 @@ class AlertEngine:
 
         # ── WARN-ONLY events (video speaking) — never escalate ────────────────
         if key in _WARN_ONLY:
-            if not self._warned_this_period.get(key):
+            if not self._warned_this_period.get(key) and self._warn_ok(key, now):
                 alert_manager.warn(warn_msg)
                 self._warned_this_period[key] = True
+                self._arm_warn_cooldown(key, now)
             return
 
         # ── First-N occurrences are warnings only ─────────────────────────────
         warn_n = _WARN_FIRST_N.get(key, 0)
         if event.occurrence_count <= warn_n:
-            if not self._warned_this_period.get(key):
+            if not self._warned_this_period.get(key) and self._warn_ok(key, now):
                 alert_manager.warn(warn_msg)
                 self._warned_this_period[key] = True
+                self._arm_warn_cooldown(key, now)
             return
 
         # ── Duration-zone warning (risk engine returned 0 — still building up) -
         # Show an amber warning while the event is in its warning zone
         # (e.g. face_hidden 2–5s, fake_presence < 15s).
         if event.risk_added == 0:
-            if event.is_new_occurrence and not self._warned_this_period.get(key):
+            if event.is_new_occurrence and not self._warned_this_period.get(key) \
+                    and self._warn_ok(key, now):
                 alert_manager.warn(warn_msg)
                 self._warned_this_period[key] = True
+                self._arm_warn_cooldown(key, now)
             return
 
         # ── Risk was scored → candidate for API alert ─────────────────────────
@@ -169,6 +195,14 @@ class AlertEngine:
         self.last_snapshot_path = self._save_snapshot("audio", frame, now)
 
     # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _warn_ok(self, key: str, now: float) -> bool:
+        """True if the warn cooldown for this key has elapsed."""
+        return now >= self._warn_cooldown_until.get(key, 0.0)
+
+    def _arm_warn_cooldown(self, key: str, now: float) -> None:
+        cd = _WARN_COOLDOWNS.get(key, 5.0)
+        self._warn_cooldown_until[key] = now + cd
 
     def _save_snapshot(self, key: str, frame, now: float) -> str | None:
         """Save frame as JPEG proof. Returns filepath or None on failure."""

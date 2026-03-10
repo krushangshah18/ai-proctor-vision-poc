@@ -47,8 +47,17 @@ class RiskEvent:
 # Events whose score contribution never decays (stays in _fixed_score)
 _NON_DECAYING = {"tab_switch", "phone", "fake_presence", "multiple_people", "no_person"}
 
-# Minimum confidence for any risk to be applied (confidence weighting: Risk += base × conf)
+# Global fallback minimum confidence for scoring (confidence weighting: Risk += base × conf)
 _MIN_CONF = 0.5
+
+# Per-key minimum confidence — matches the YOLO detector threshold for each object class.
+# Falls back to _MIN_CONF for keys not listed (head/gaze events always pass 1.0 anyway).
+_SCORE_MIN_CONF: dict[str, float] = {
+    "phone"    : 0.60,
+    "book"     : 0.65,
+    "headphone": 0.40,
+    "earbud"   : 0.40,
+}
 
 # Risk-scoring cooldowns: how often (seconds) the same event can add to the score.
 # These are short (scoring mechanics). API-alert cooldowns are longer and live in AlertEngine.
@@ -58,14 +67,14 @@ _SCORE_COOLDOWNS: dict[str, float] = {
     "looking_up"     : 3,
     "looking_side"   : 3,
     "partial_face"   : 3,
-    "face_hidden"    : 10,
+    "face_hidden"    :  3,
     "book"           : 60,
-    "headphone"      : 120,
-    "earbud"         :  60,
+    "headphone"      : 60,
+    "earbud"         : 60,
     "phone"          : 15,
     "multiple_people": 10,
     "no_person"      : 10,
-    "fake_presence"  : 15,
+    "fake_presence"  : 10,
 }
 
 _GAZE_EVENTS = {"looking_away", "looking_down", "looking_up", "looking_side"}
@@ -80,7 +89,8 @@ _T_ADMIN      = 100
 
 class RiskEngine:
 
-    def __init__(self, session_duration_s: float = 3600.0):
+    def __init__(self, session_duration_s: float = 3600.0,
+                 flicker_grace_s: float = 1.5):
         # Two-bucket score
         self._fixed_score:    float = 0.0   # non-decaying
         self._decaying_score: float = 0.0   # decays every interval
@@ -118,6 +128,12 @@ class RiskEngine:
         self._multi_people_since: Optional[float] = None
         self._no_person_since:    Optional[float] = None
 
+        # Flicker grace: timestamp when condition first went inactive.
+        # Timer only resets after condition stays inactive for this many seconds.
+        self._flicker_grace_s:          float          = flicker_grace_s
+        self._multi_people_gone_since:  Optional[float] = None
+        self._no_person_gone_since:     Optional[float] = None
+
         # Currently-active event set (for combo detection)
         self._active_set: set[str] = set()
 
@@ -129,6 +145,15 @@ class RiskEngine:
     @property
     def score(self) -> float:
         return self._fixed_score + self._decaying_score
+
+    def continuous_duration(self, key: str) -> float:
+        """Seconds the key has been continuously active (0.0 if not active)."""
+        now = time.time()
+        if key == "multiple_people":
+            return (now - self._multi_people_since) if self._multi_people_since else 0.0
+        if key == "no_person":
+            return (now - self._no_person_since) if self._no_person_since else 0.0
+        return 0.0
 
     def process_event(self, key: str, active: bool,
                       confidence: float = 1.0,
@@ -179,8 +204,20 @@ class RiskEngine:
         # ── Decay (applied every frame, limited by interval) ──────────────────
         self._apply_decay(now)
 
-        # ── Inactive: just update state and return ────────────────────────────
+        # ── Inactive: reset continuous timers (with flicker grace) ───────────
         if not active:
+            if key == "multiple_people" and self._multi_people_since is not None:
+                if self._multi_people_gone_since is None:
+                    self._multi_people_gone_since = now
+                elif now - self._multi_people_gone_since >= self._flicker_grace_s:
+                    self._multi_people_since     = None
+                    self._multi_people_gone_since = None
+            elif key == "no_person" and self._no_person_since is not None:
+                if self._no_person_gone_since is None:
+                    self._no_person_gone_since = now
+                elif now - self._no_person_gone_since >= self._flicker_grace_s:
+                    self._no_person_since     = None
+                    self._no_person_gone_since = None
             self._update_state()
             return RiskEvent(key=key, active=False, occurrence_count=occ)
 
@@ -197,7 +234,7 @@ class RiskEngine:
         if key in _GAZE_EVENTS and risk_added > 0:
             self._gaze_timestamps.append(now)
             self._gaze_timestamps = [t for t in self._gaze_timestamps if now - t <= 30]
-            if (len(self._gaze_timestamps) >= 5
+            if (len(self._gaze_timestamps) >= 3
                     and now - self._last_gaze_bonus_time > 30):
                 self._add(10.0, decaying=True)
                 self._last_gaze_bonus_time = now
@@ -277,7 +314,8 @@ class RiskEngine:
     def _score_event(self, key: str, confidence: float,
                      duration: float, occ: int, now: float) -> float:
         """Apply per-event scoring policy. Returns amount added to score."""
-        if confidence < _MIN_CONF:
+        min_conf = _SCORE_MIN_CONF.get(key, _MIN_CONF)
+        if confidence < min_conf:
             return 0.0
         if self._in_cooldown(key, now):
             return 0.0
@@ -297,27 +335,27 @@ class RiskEngine:
         # ── Headphone / earbud ────────────────────────────────────────────────
         elif key in ("headphone", "earbud"):
             if occ > 1:
-                added = self._add(10.0 * confidence, decaying=True)
+                added = self._add(20.0 * confidence, decaying=True)
 
         # ── Multiple people ───────────────────────────────────────────────────
         elif key == "multiple_people":
             if occ == 2:
-                added = self._add(10.0 * confidence, decaying=False)
+                added = self._add(20.0 * confidence, decaying=False)
             elif occ >= 3:
                 added = self._add(50.0 * confidence, decaying=False)
             # occ == 1: warning only (handled in AlertEngine)
 
         # ── Book ──────────────────────────────────────────────────────────────
         elif key == "book":
-            added = self._add(10.0 * confidence, decaying=True)
+            added = self._add(20.0 * confidence, decaying=True)
 
         # ── Fake presence (duration-tiered) ───────────────────────────────────
         elif key == "fake_presence":
-            if duration >= 40:
+            if duration >= 25:
                 added = self._add(60.0 * confidence, decaying=False)
-            elif duration >= 15:
+            elif duration >= 10:
                 added = self._add(30.0 * confidence, decaying=False)
-            # < 15s: warning only
+            # < 10s: warning only
 
         # ── Face hidden (duration-tiered) ─────────────────────────────────────
         elif key == "face_hidden":
@@ -325,7 +363,7 @@ class RiskEngine:
                 added = self._add(20.0 * confidence, decaying=True)
             elif duration >= 5:
                 added = self._add(10.0 * confidence, decaying=True)
-            # < 5s: warning only (2-5s is warning zone)
+            # < 5s: warning only
 
         # ── Gaze events (Option A: +5 every 3s-cooldown while active) ─────────
         elif key in _GAZE_EVENTS:
@@ -357,6 +395,7 @@ class RiskEngine:
         Returns None to let normal scoring proceed.
         """
         if key == "multiple_people":
+            self._multi_people_gone_since = None   # condition active — cancel grace timer
             if self._multi_people_since is None:
                 self._multi_people_since = now
             elif now - self._multi_people_since >= 20:
@@ -365,6 +404,7 @@ class RiskEngine:
                                  termination_reason=self._termination_reason)
 
         elif key == "no_person":
+            self._no_person_gone_since = None      # condition active — cancel grace timer
             if self._no_person_since is None:
                 self._no_person_since = now
             else:

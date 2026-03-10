@@ -25,8 +25,16 @@ class AlertManager:
     # ── Public write API ───────────────────────────────────────────────────
 
     def warn(self, message: str) -> None:
-        """On-screen soft warning. No logging, no API call."""
-        self._warnings.append({"message": message, "timestamp": time.time()})
+        """On-screen soft warning. No logging, no API call.
+        If the same message is already active, refresh its timestamp instead of
+        adding a duplicate — prevents the same warning from stacking on screen.
+        """
+        now = time.time()
+        for entry in self._warnings:
+            if entry["message"] == message:
+                entry["timestamp"] = now
+                return
+        self._warnings.append({"message": message, "timestamp": now})
 
     def alert(self, message: str) -> None:
         """On-screen hard alert + triggers on_alert callback (= API / report log)."""

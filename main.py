@@ -55,7 +55,12 @@ def _draw_risk_overlay(frame: np.ndarray, risk: RiskEngine) -> None:
     score = info["score"]
     color = _STATE_COLORS.get(risk.state, (200, 200, 200))
 
-    panel_w, panel_h = 220, 82
+    # Expand panel height if any continuous-timer debug lines are needed
+    multi_dur = risk.continuous_duration("multiple_people")
+    no_dur    = risk.continuous_duration("no_person")
+    extra_lines = (1 if multi_dur > 0 else 0) + (1 if no_dur > 0 else 0)
+
+    panel_w, panel_h = 220, 82 + extra_lines * 18
     x1 = w - panel_w - 10;  y1 = 10
     x2 = w - 10;             y2 = y1 + panel_h
 
@@ -80,11 +85,61 @@ def _draw_risk_overlay(frame: np.ndarray, risk: RiskEngine) -> None:
     cv2.putText(frame, f"F=fixed  D=decaying",
                 (x1 + 6, y1 + 76), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1)
 
+    # Continuous-timer debug lines (shown only when active)
+    debug_y = y1 + 76 + 18
+    if multi_dur > 0:
+        bar_frac = min(multi_dur / 20.0, 1.0)
+        timer_color = (0, 0, 255) if multi_dur >= 15 else (0, 165, 255)
+        cv2.putText(frame, f"MultiPpl: {multi_dur:.1f}s / 20s",
+                    (x1 + 6, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.40, timer_color, 1)
+        # Mini progress bar toward 20s termination threshold
+        bar_x2 = bx1 + int(bw * bar_frac)
+        cv2.rectangle(frame, (bx1, debug_y + 3), (bx2, debug_y + 7), (55, 55, 55), -1)
+        if bar_x2 > bx1:
+            cv2.rectangle(frame, (bx1, debug_y + 3), (bar_x2, debug_y + 7), timer_color, -1)
+        debug_y += 18
+    if no_dur > 0:
+        bar_frac = min(no_dur / 20.0, 1.0)
+        timer_color = (0, 0, 255) if no_dur >= 15 else (0, 165, 255)
+        cv2.putText(frame, f"NoPerson: {no_dur:.1f}s / 20s",
+                    (x1 + 6, debug_y), cv2.FONT_HERSHEY_SIMPLEX, 0.40, timer_color, 1)
+        bar_x2 = bx1 + int(bw * bar_frac)
+        cv2.rectangle(frame, (bx1, debug_y + 3), (bx2, debug_y + 7), (55, 55, 55), -1)
+        if bar_x2 > bx1:
+            cv2.rectangle(frame, (bx1, debug_y + 3), (bar_x2, debug_y + 7), timer_color, -1)
+
     if info["terminated"]:
         cv2.rectangle(frame, (0, h // 2 - 32), (w, h // 2 + 32), (0, 0, 180), -1)
         cv2.putText(frame, "EXAM TERMINATED",
                     (w // 2 - 165, h // 2 + 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+
+
+# ── Partial face banner ───────────────────────────────────────────────────────
+
+def _draw_partial_face_banner(frame: np.ndarray) -> None:
+    """Bold bottom-of-frame banner when candidate is too far from camera."""
+    h, w = frame.shape[:2]
+    banner_h = 70
+    y1 = h - banner_h
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, y1), (w, h), (0, 120, 255), -1)   # deep orange
+    cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
+
+    # Main instruction — large, centred
+    msg  = "MOVE CLOSER TO CAMERA"
+    sz   = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.95, 3)[0]
+    cv2.putText(frame, msg,
+                ((w - sz[0]) // 2, y1 + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 3, cv2.LINE_AA)
+
+    # Sub-text — smaller
+    sub  = "Face too small — earphone detection may be impaired"
+    sz2  = cv2.getTextSize(sub, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+    cv2.putText(frame, sub,
+                ((w - sz2[0]) // 2, y1 + 56),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
@@ -248,7 +303,8 @@ def main():
     head_tracker   = HeadTracker(states, LOOKING_AWAY_THRESHOLD, debug=DEBUG)
     liveness       = LivenessDetector(FAKE_WINDOW, SAMPLE_INTERVAL, MIN_VARIANCE,
                                       NO_BLINK_TIMEOUT, LIVENESS_WEIGHTS)
-    risk           = RiskEngine(session_duration_s=RISK_SESSION_DURATION_S)
+    risk           = RiskEngine(session_duration_s=RISK_SESSION_DURATION_S,
+                                flicker_grace_s=TIMER_FLICKER_GRACE_S)
 
     def _enrich_last_entry() -> None:
         """Attach score_added and snapshot path to the most recent API alert log entry."""
@@ -381,7 +437,9 @@ def main():
             elif cls == "earbud"    : earbud    = True; eb_conf    = conf
 
         # ── Head / gaze: duration-gate → risk → alert ─────────────────────────
-        face_hidden_cond = not (yaw or pitch or gaze) and people_count == 0
+        # face_hidden: person present (YOLO detects) but face landmarks absent (obscured)
+        # no_person: nobody detected by either YOLO or MediaPipe
+        face_hidden_cond = people_count > 0 and not (yaw or pitch or gaze)
 
         head_conditions: dict[str, tuple[bool, bool]] = {
             "looking_away" : (looking_away,                  DETECT_LOOKING_AWAY),
@@ -394,13 +452,22 @@ def main():
             "speaking"     : (speaking,                      DETECT_SPEAKING),
         }
 
+        partial_face_triggered = False
         for key, (cond, enabled) in head_conditions.items():
             if not enabled:
                 continue
 
             # Duration gate: HeadTracker returns True only after threshold
-            t        = SPEAKING_THRESHOLD if key == "speaking" else None
+            if key == "speaking":
+                t = SPEAKING_THRESHOLD
+            elif key == "looking_side":
+                t = GAZE_THRESHOLD
+            else:
+                t = None
             triggered = head_tracker.process(frame, key, cond, threshold=t)
+
+            if key == "partial_face":
+                partial_face_triggered = triggered
 
             # Duration of current active period (from HeadTracker's start_time)
             dur = _get_duration(states, key) if triggered else 0.0
@@ -472,18 +539,21 @@ def main():
                             alert_log[-1]["snapshot"] = alert_engine.last_snapshot_path
 
         # ── Drawing ───────────────────────────────────────────────────────────
-        if DEBUG:
-            if DRAW_OBJECTS:
-                draw_detections(frame, detections)
-            if DRAW_ALERTS:
-                draw_alerts(
-                    frame,
-                    alert_manager.get_active_warnings(),
-                    alert_manager.get_active_alerts(),
-                )
+        if DRAW_OBJECTS:
+            draw_detections(frame, detections)
+        if DRAW_ALERTS:
+            draw_alerts(
+                frame,
+                alert_manager.get_active_warnings(),
+                alert_manager.get_active_alerts(),
+            )
 
         if DRAW_RISK_OVERLAY:
             _draw_risk_overlay(frame, risk)
+
+        # Partial face banner — drawn last so it sits on top of everything
+        if partial_face_triggered:
+            _draw_partial_face_banner(frame)
 
         cv2.imshow("AI Proctor", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):

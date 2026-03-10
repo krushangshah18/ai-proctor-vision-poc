@@ -10,6 +10,7 @@ from config import (
     EAR_THRESHOLD, BLINK_FRAMES,
     MAR_VAR_THRESHOLD, MAR_VEL_THRESHOLD, MAR_OSC_THRESHOLD,
     MAR_YAWN_THRESHOLD, SILENCE_VEL_THRESHOLD, SPEAKING_HOLD_FRAMES,
+    MIN_FACE_WIDTH, MIN_FACE_HEIGHT,
 )
 
 
@@ -41,9 +42,9 @@ class HeadPoseDetector:
         self.RIGHT_EYE_RIGHT = 263
         self.RIGHT_IRIS = 473
 
-        # Face Size Constraints
-        self.MIN_FACE_WIDTH = 80
-        self.MIN_FACE_HEIGHT = 100
+        # Face Size Constraints — sourced from config.py
+        self.MIN_FACE_WIDTH  = MIN_FACE_WIDTH
+        self.MIN_FACE_HEIGHT = MIN_FACE_HEIGHT
 
 
         # Eye landmarks (MediaPipe)
