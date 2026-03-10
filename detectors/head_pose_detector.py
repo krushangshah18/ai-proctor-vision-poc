@@ -4,6 +4,15 @@ import mediapipe as mp
 
 from collections import deque
 import numpy as np
+from config import (
+    LOOK_AWAY_YAW, LOOK_DOWN_PITCH, LOOK_UP_PITCH,
+    GAZE_LEFT, GAZE_RIGHT,
+    EAR_THRESHOLD, BLINK_FRAMES,
+    MAR_VAR_THRESHOLD, MAR_VEL_THRESHOLD, MAR_OSC_THRESHOLD,
+    MAR_YAWN_THRESHOLD, SILENCE_VEL_THRESHOLD, SPEAKING_HOLD_FRAMES,
+)
+
+
 class HeadPoseDetector:
     def __init__(self, debug=False):
         self.face_mesh = mp.solutions.face_mesh.FaceMesh( #Creates the actual face detector.
@@ -41,18 +50,18 @@ class HeadPoseDetector:
         self.LEFT_EYE_POINTS = [33, 160, 158, 133, 153, 144]
         self.RIGHT_EYE_POINTS = [362, 385, 387, 263, 373, 380]
 
-        # Blink config
-        self.EAR_THRESHOLD = 0.20 #(Eye Aspect Ratio) : measures how open the eye is
-        self.BLINK_FRAMES = 2
+        # Blink config — sourced from config.py
+        self.EAR_THRESHOLD = EAR_THRESHOLD
+        self.BLINK_FRAMES  = BLINK_FRAMES
         self.blink_counter = 0
-        self.total_blinks = 0
+        self.total_blinks  = 0
 
-        # Head  Pose Thresholds
-        self.LOOK_AWAY_YAW = 0.2
-        self.LOOK_DOWN_PITCH = 0.13
-        self.LOOK_UP_PITCH = -0.1
-        self.GAZE_LEFT = -0.15
-        self.GAZE_RIGHT = 0.15
+        # Head Pose Thresholds — sourced from config.py
+        self.LOOK_AWAY_YAW   = LOOK_AWAY_YAW
+        self.LOOK_DOWN_PITCH = LOOK_DOWN_PITCH
+        self.LOOK_UP_PITCH   = LOOK_UP_PITCH
+        self.GAZE_LEFT       = GAZE_LEFT
+        self.GAZE_RIGHT      = GAZE_RIGHT
 
         # Lips
         self.UPPER_LIP = 13
@@ -67,15 +76,13 @@ class HeadPoseDetector:
 
         self.prev_mar = None
 
-        # thresholds
-        self.MAR_VAR_THRESHOLD = 0.0006
-        self.MAR_VEL_THRESHOLD = 0.012
-        self.MAR_OSC_THRESHOLD = 4
-        self.MAR_YAWN_THRESHOLD = 0.45   # mean MAR above this → yawn, not speech
-        self.SILENCE_VEL_THRESHOLD = 0.005  # recent velocity below this → definitely silent
-
-        # hold state: bridge brief inter-word gaps (~133ms @ 30fps)
-        self.SPEAKING_HOLD_FRAMES = 4
+        # Speaking / lip thresholds — sourced from config.py
+        self.MAR_VAR_THRESHOLD    = MAR_VAR_THRESHOLD
+        self.MAR_VEL_THRESHOLD    = MAR_VEL_THRESHOLD
+        self.MAR_OSC_THRESHOLD    = MAR_OSC_THRESHOLD
+        self.MAR_YAWN_THRESHOLD   = MAR_YAWN_THRESHOLD
+        self.SILENCE_VEL_THRESHOLD = SILENCE_VEL_THRESHOLD
+        self.SPEAKING_HOLD_FRAMES = SPEAKING_HOLD_FRAMES
         self._speaking_hold = 0
     
 
