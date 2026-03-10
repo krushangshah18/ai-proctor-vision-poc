@@ -32,7 +32,7 @@ DETECT_AUDIO           = True    # enables microphone + ProctorSession
                                  # (extra speaker, voice mismatch, ghost voice…)
 
 # ── Drawing Toggles ──────────────────────────────────────────────────────────
-DRAW_HEAD_POSE = True    # iris dots, face-centre lines, nose dot
+DRAW_HEAD_POSE = False    # iris dots, face-centre lines, nose dot
 DRAW_OBJECTS   = True    # YOLO bounding boxes + class labels
 DRAW_ALERTS    = True    # alert text overlay on the video frame
 
@@ -73,11 +73,16 @@ LIVENESS_WEIGHTS = {"yaw": 0.45, "gaze": 0.45, "pitch": 0.10}
 # ── Object Detection (temporal stability) ────────────────────────────────────
 OBJECT_WINDOW    = 15   # rolling frame window
 OBJECT_MIN_VOTES = 5    # object must appear in N of last OBJECT_WINDOW frames
+PHONE_MIN_VOTES  = 9    # stricter: phone must appear in 9/15 frames (reduces false positives)
 
 # ── Audio Proctoring ─────────────────────────────────────────────────────────
 AUDIO_SR       = 16000            # sample rate (Hz)
 AUDIO_CHUNK    = 512              # samples per chunk (~32 ms @ 16 kHz)
 ENROLLMENT_WAV = "enrollment.wav" # path to reference speaker recording
+
+# ── Risk Scoring ─────────────────────────────────────────────────────────────
+RISK_SESSION_DURATION_S = 3600   # assumed exam duration in seconds (used for decay interval)
+DRAW_RISK_OVERLAY       = True   # show score / state overlay on video frame
 
 # ── Session Report ────────────────────────────────────────────────────────────
 SAVE_REPORT = True        # write a JSON report when the session ends

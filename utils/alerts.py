@@ -1,27 +1,53 @@
 from collections import deque
 import time
 
-class AlertManager: 
-    def __init__(self, display_duration=2.0):
-        self.alerts = deque()
-        self.display_duration = display_duration
 
-    def add_alert(self, message):
-        """
-        adds alert to the tail of of queue
-        """
-        self.alerts.append({
-            "message": message,
-            "timestamp": time.time()
-        })
-    
-    def get_active_alerts(self):
-        """
-        returns alerts whose display_duration is not completed and removes the expired ones          
-        """
-        current_time = time.time()
+class AlertManager:
+    """
+    Two-tier alert system:
 
-        while self.alerts and current_time - self.alerts[0]["timestamp"] > self.display_duration:
-            self.alerts.popleft()
+    warn(msg)  — soft on-screen warning (yellow).  NOT logged.  Not an API call.
+                 Used for first-occurrence notices. OK to show frequently.
 
-        return [alert["message"] for alert in self.alerts]
+    alert(msg) — hard API event (red on screen + logged to report).
+                 Treat as a backend API call — rate-limit via AlertEngine.
+    """
+
+    def __init__(self, warn_duration: float = 3.0, alert_duration: float = 5.0):
+        self._warnings: deque = deque()
+        self._alerts:   deque = deque()
+        self.warn_duration  = warn_duration
+        self.alert_duration = alert_duration
+
+        # Set this to a callable(message) to capture alerts for the session report.
+        self.on_alert = None
+
+    # ── Public write API ───────────────────────────────────────────────────
+
+    def warn(self, message: str) -> None:
+        """On-screen soft warning. No logging, no API call."""
+        self._warnings.append({"message": message, "timestamp": time.time()})
+
+    def alert(self, message: str) -> None:
+        """On-screen hard alert + triggers on_alert callback (= API / report log)."""
+        self._alerts.append({"message": message, "timestamp": time.time()})
+        if self.on_alert:
+            self.on_alert(message)
+
+    # Backward-compat alias (used by audio event path)
+    def add_alert(self, message: str) -> None:
+        self.alert(message)
+
+    # ── Public read API ────────────────────────────────────────────────────
+
+    def get_active_warnings(self) -> list[str]:
+        now = time.time()
+        while self._warnings and now - self._warnings[0]["timestamp"] > self.warn_duration:
+            self._warnings.popleft()
+        return [w["message"] for w in self._warnings]
+
+    def get_active_alerts(self) -> list[str]:
+        now = time.time()
+        while self._alerts and now - self._alerts[0]["timestamp"] > self.alert_duration:
+            self._alerts.popleft()
+        return [a["message"] for a in self._alerts]
