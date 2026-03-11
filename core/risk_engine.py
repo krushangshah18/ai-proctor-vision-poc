@@ -93,6 +93,10 @@ class RiskEngine:
         self._multi_people_since: Optional[float] = None
         self._no_person_since:    Optional[float] = None
 
+        # Frozen durations — set at termination so the overlay timer stops ticking
+        self._frozen_multi_dur:     float = 0.0
+        self._frozen_no_person_dur: float = 0.0
+
         # Flicker grace: timestamp when condition first went inactive.
         # Timer only resets after condition stays inactive for this many seconds.
         self._flicker_grace_s:          float          = flicker_grace_s
@@ -113,6 +117,12 @@ class RiskEngine:
 
     def continuous_duration(self, key: str) -> float:
         """Seconds the key has been continuously active (0.0 if not active)."""
+        if self.terminated:
+            if key == "multiple_people":
+                return self._frozen_multi_dur
+            if key == "no_person":
+                return self._frozen_no_person_dur
+            return 0.0
         now = time.time()
         if key == "multiple_people":
             return (now - self._multi_people_since) if self._multi_people_since else 0.0
@@ -449,6 +459,9 @@ class RiskEngine:
 
     def _terminate(self, reason: str) -> None:
         if not self.terminated:
+            now = time.time()
+            self._frozen_multi_dur     = (now - self._multi_people_since) if self._multi_people_since else 0.0
+            self._frozen_no_person_dur = (now - self._no_person_since)    if self._no_person_since    else 0.0
             self.terminated          = True
             self._termination_reason = reason
             self.state               = ExamState.TERMINATED

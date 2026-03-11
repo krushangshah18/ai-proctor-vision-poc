@@ -358,6 +358,7 @@ def main():
         # face_hidden: person present (YOLO detects) but face landmarks absent (obscured)
         # no_person: nobody detected by either YOLO or MediaPipe
         face_hidden_cond = people_count > 0 and not (yaw or pitch or gaze)
+        no_person_cond   = people_count == 0 and not (yaw or pitch or gaze)
 
         head_conditions: dict[str, tuple[bool, bool]] = {
             "looking_away" : (looking_away,                  DETECT_LOOKING_AWAY),
@@ -366,7 +367,9 @@ def main():
             "looking_side" : (looking_left or looking_right, DETECT_LOOKING_SIDE),
             "face_hidden"  : (face_hidden_cond,              DETECT_FACE_HIDDEN),
             "partial_face" : (partial_face,                  DETECT_PARTIAL_FACE),
-            "fake_presence": (fake,                          DETECT_FAKE_PRESENCE),
+            # Suppress fake_presence when no person is detected — liveness gets
+            # all-zero inputs (no face) which falsely looks like "no movement".
+            "fake_presence": (fake and not no_person_cond,   DETECT_FAKE_PRESENCE),
         }
 
         partial_face_triggered = False
@@ -416,7 +419,6 @@ def main():
             _enrich_last_entry()
 
         # ── No person ─────────────────────────────────────────────────────────
-        no_person_cond = people_count == 0 and not (yaw or pitch or gaze)
         rev = risk.process_event("no_person", no_person_cond)
         alert_engine.handle(rev, frame, alert_manager)
         if alert_engine.last_snapshot_path and alert_log:
