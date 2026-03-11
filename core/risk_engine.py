@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+import settings.scoring as S
+
 
 # ── State machine ─────────────────────────────────────────────────────────────
 
@@ -42,47 +44,10 @@ class RiskEvent:
     termination_reason: str  = ""
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-# Events whose score contribution never decays (stays in _fixed_score)
-_NON_DECAYING = {"tab_switch", "phone", "fake_presence", "multiple_people", "no_person"}
-
-# Global fallback minimum confidence for scoring (confidence weighting: Risk += base × conf)
-_MIN_CONF = 0.5
-
-# Per-key minimum confidence — matches the YOLO detector threshold for each object class.
-# Falls back to _MIN_CONF for keys not listed (head/gaze events always pass 1.0 anyway).
-_SCORE_MIN_CONF: dict[str, float] = {
-    "phone"    : 0.60,
-    "book"     : 0.65,
-    "headphone": 0.40,
-    "earbud"   : 0.40,
-}
-
-# Risk-scoring cooldowns: how often (seconds) the same event can add to the score.
-# These are short (scoring mechanics). API-alert cooldowns are longer and live in AlertEngine.
-_SCORE_COOLDOWNS: dict[str, float] = {
-    "looking_away"   : 3,
-    "looking_down"   : 3,
-    "looking_up"     : 3,
-    "looking_side"   : 3,
-    "partial_face"   : 3,
-    "face_hidden"    :  3,
-    "book"           : 60,
-    "headphone"      : 60,
-    "earbud"         : 60,
-    "phone"          : 15,
-    "multiple_people": 10,
-    "no_person"      : 10,
-    "fake_presence"  : 10,
-}
+# ── Constants — all values sourced from settings.scoring ──────────────────────
+# Edit settings/scoring.py to change any threshold, score, or cooldown.
 
 _GAZE_EVENTS = {"looking_away", "looking_down", "looking_up", "looking_side"}
-
-# State thresholds (score ranges)
-_T_WARNING    = 30
-_T_HIGH_RISK  = 60
-_T_ADMIN      = 100
 
 
 # ── Engine ────────────────────────────────────────────────────────────────────
@@ -233,10 +198,10 @@ class RiskEngine:
         # ── Gaze aggregation bonus ─────────────────────────────────────────────
         if key in _GAZE_EVENTS and risk_added > 0:
             self._gaze_timestamps.append(now)
-            self._gaze_timestamps = [t for t in self._gaze_timestamps if now - t <= 30]
-            if (len(self._gaze_timestamps) >= 3
-                    and now - self._last_gaze_bonus_time > 30):
-                self._add(10.0, decaying=True)
+            self._gaze_timestamps = [t for t in self._gaze_timestamps if now - t <= S.GAZE_WINDOW_S]
+            if (len(self._gaze_timestamps) >= S.GAZE_BONUS_MIN_EVENTS
+                    and now - self._last_gaze_bonus_time > S.GAZE_WINDOW_S):
+                self._add(S.GAZE_BONUS_SCORE, decaying=True)
                 self._last_gaze_bonus_time = now
 
         # ── Combo bonuses ──────────────────────────────────────────────────────
@@ -259,7 +224,7 @@ class RiskEngine:
         Audio risk is always decaying.
         Returns the actual score added (0 if confidence too low).
         """
-        if confidence < _MIN_CONF:
+        if confidence < S.MIN_CONF:
             return 0.0
         added = base_score * confidence
         self._add(added, decaying=True)
@@ -299,80 +264,92 @@ class RiskEngine:
         """Add to the appropriate bucket. Returns amount added."""
         amount = max(0.0, amount)
         if decaying:
-            self._decaying_score = min(150.0, self._decaying_score + amount)
+            self._decaying_score = min(S.DECAY_BUCKET_CAP, self._decaying_score + amount)
         else:
-            self._fixed_score = min(150.0, self._fixed_score + amount)
+            self._fixed_score = min(S.DECAY_BUCKET_CAP, self._fixed_score + amount)
         return amount
 
     def _in_cooldown(self, key: str, now: float) -> bool:
         return now < self._score_cooldown_until.get(key, 0.0)
 
     def _arm_cooldown(self, key: str, now: float, override_cd: float = 0.0) -> None:
-        cd = override_cd if override_cd > 0 else _SCORE_COOLDOWNS.get(key, 3.0)
+        cd = override_cd if override_cd > 0 else S.SCORE_COOLDOWNS.get(key, 3.0)
         self._score_cooldown_until[key] = now + cd
 
     def _score_event(self, key: str, confidence: float,
                      duration: float, occ: int, now: float) -> float:
         """Apply per-event scoring policy. Returns amount added to score."""
-        min_conf = _SCORE_MIN_CONF.get(key, _MIN_CONF)
+        min_conf = S.SCORE_MIN_CONF.get(key, S.MIN_CONF)
         if confidence < min_conf:
             return 0.0
         if self._in_cooldown(key, now):
             return 0.0
 
-        decaying = key not in _NON_DECAYING
+        decaying = key not in S.NON_DECAYING
         added    = 0.0
 
         # ── Phone ──────────────────────────────────────────────────────────────
         if key == "phone":
-            if occ == 1:
-                pass             # first occurrence: warning only, score applied on 2nd+
-            elif occ == 2:
-                added = self._add(25.0 * confidence, decaying=False)
+            grace = S.GRACE_OCCURRENCES.get("phone", 1)
+            if occ <= grace:
+                self._arm_cooldown(key, now)   # grace: arm cooldown, no score
+            elif occ == grace + 1:
+                added = self._add(S.PHONE_SCORE_2ND * confidence, decaying=False)
             else:
-                added = self._add(50.0 * confidence, decaying=False)
+                added = self._add(S.PHONE_SCORE_3RD * confidence, decaying=False)
 
         # ── Headphone / earbud ────────────────────────────────────────────────
-        elif key in ("headphone", "earbud"):
-            if occ > 1:
-                added = self._add(20.0 * confidence, decaying=True)
+        elif key == "headphone":
+            grace = S.GRACE_OCCURRENCES.get("headphone", 1)
+            if occ <= grace:
+                self._arm_cooldown(key, now)   # grace: arm cooldown, no score
+            else:
+                added = self._add(S.HEADPHONE_SCORE * confidence, decaying=True)
+        elif key == "earbud":
+            grace = S.GRACE_OCCURRENCES.get("earbud", 1)
+            if occ <= grace:
+                self._arm_cooldown(key, now)   # grace: arm cooldown, no score
+            else:
+                added = self._add(S.EARBUD_SCORE * confidence, decaying=True)
 
         # ── Multiple people ───────────────────────────────────────────────────
         elif key == "multiple_people":
-            if occ == 2:
-                added = self._add(20.0 * confidence, decaying=False)
-            elif occ >= 3:
-                added = self._add(50.0 * confidence, decaying=False)
-            # occ == 1: warning only (handled in AlertEngine)
+            grace = S.GRACE_OCCURRENCES.get("multiple_people", 1)
+            if occ <= grace:
+                self._arm_cooldown(key, now)   # grace: arm cooldown, no score
+            elif occ == grace + 1:
+                added = self._add(S.MULTI_PEOPLE_SCORE_2ND * confidence, decaying=False)
+            else:
+                added = self._add(S.MULTI_PEOPLE_SCORE_3RD * confidence, decaying=False)
 
         # ── Book ──────────────────────────────────────────────────────────────
         elif key == "book":
-            added = self._add(20.0 * confidence, decaying=True)
+            added = self._add(S.BOOK_SCORE * confidence, decaying=True)
 
         # ── Fake presence (duration-tiered) ───────────────────────────────────
         elif key == "fake_presence":
-            if duration >= 25:
-                added = self._add(60.0 * confidence, decaying=False)
-            elif duration >= 10:
-                added = self._add(30.0 * confidence, decaying=False)
-            # < 10s: warning only
+            if duration >= S.FAKE_PRESENCE_DUR_2:
+                added = self._add(S.FAKE_PRESENCE_SCORE_2 * confidence, decaying=False)
+            elif duration >= S.FAKE_PRESENCE_DUR_1:
+                added = self._add(S.FAKE_PRESENCE_SCORE_1 * confidence, decaying=False)
+            # < DUR_1: warning only
 
         # ── Face hidden (duration-tiered) ─────────────────────────────────────
         elif key == "face_hidden":
-            if duration >= 10:
-                added = self._add(20.0 * confidence, decaying=True)
-            elif duration >= 5:
-                added = self._add(10.0 * confidence, decaying=True)
-            # < 5s: warning only
+            if duration >= S.FACE_HIDDEN_DUR_2:
+                added = self._add(S.FACE_HIDDEN_SCORE_2 * confidence, decaying=True)
+            elif duration >= S.FACE_HIDDEN_DUR_1:
+                added = self._add(S.FACE_HIDDEN_SCORE_1 * confidence, decaying=True)
+            # < DUR_1: warning only
 
-        # ── Gaze events (Option A: +5 every 3s-cooldown while active) ─────────
+        # ── Gaze events ────────────────────────────────────────────────────────
         elif key in _GAZE_EVENTS:
-            added = self._add(5.0 * confidence, decaying=True)
+            added = self._add(S.GAZE_SCORE * confidence, decaying=True)
 
         # ── Partial face ──────────────────────────────────────────────────────
         elif key == "partial_face":
-            if duration >= 3:
-                added = self._add(2.0 * confidence, decaying=True)
+            if duration >= S.PARTIAL_FACE_DURATION_GATE:
+                added = self._add(S.PARTIAL_FACE_SCORE * confidence, decaying=True)
 
         # ── Exit fullscreen ───────────────────────────────────────────────────
         elif key == "exit_fullscreen":
@@ -398,43 +375,43 @@ class RiskEngine:
             self._multi_people_gone_since = None   # condition active — cancel grace timer
             if self._multi_people_since is None:
                 self._multi_people_since = now
-            elif now - self._multi_people_since >= 20:
-                self._terminate("Multiple people continuously >20s")
+            elif now - self._multi_people_since >= S.MULTI_PEOPLE_TERMINATE_S:
+                self._terminate(f"Multiple people continuously >{S.MULTI_PEOPLE_TERMINATE_S:.0f}s")
                 return RiskEvent(key=key, terminated=True,
                                  termination_reason=self._termination_reason)
 
         elif key == "no_person":
             self._no_person_gone_since = None      # condition active — cancel grace timer
+            no_person_added = 0.0
             if self._no_person_since is None:
                 self._no_person_since = now
             else:
                 dur = now - self._no_person_since
-                if dur >= 20:
-                    self._terminate("No person detected >20s")
+                if dur >= S.NO_PERSON_TERMINATE_S:
+                    self._terminate(f"No person detected >{S.NO_PERSON_TERMINATE_S:.0f}s")
                     return RiskEvent(key=key, terminated=True,
                                      termination_reason=self._termination_reason)
-                elif dur >= 10 and not self._in_cooldown("_no_person_50", now):
-                    self._add(50.0, decaying=False)
-                    self._arm_cooldown("_no_person_50", now, override_cd=15)
-                elif dur >= 5 and not self._in_cooldown("_no_person_25", now):
-                    self._add(25.0, decaying=False)
-                    self._arm_cooldown("_no_person_25", now, override_cd=15)
+                elif dur >= S.NO_PERSON_DUR_2 and not self._in_cooldown("_no_person_t2", now):
+                    no_person_added = self._add(S.NO_PERSON_SCORE_2, decaying=False)
+                    self._arm_cooldown("_no_person_t2", now, override_cd=15)
+                elif dur >= S.NO_PERSON_DUR_1 and not self._in_cooldown("_no_person_t1", now):
+                    no_person_added = self._add(S.NO_PERSON_SCORE_1, decaying=False)
+                    self._arm_cooldown("_no_person_t1", now, override_cd=15)
             return RiskEvent(key=key, active=True, is_new_occurrence=(occ == 1 and duration < 1),
                              occurrence_count=occ, duration=duration,
-                             risk_added=0.0)  # scoring handled above, skip normal path
+                             risk_added=no_person_added)  # carries actual score added
 
         return None  # proceed to normal _score_event
 
     def _check_combos(self, key: str, confidence: float, now: float) -> None:
         combos = [
-            ({"looking_down", "book"},    15.0, "_combo_down_book"),
-            ({"looking_side", "speaking"}, 15.0, "_combo_side_speaking"),
-            ({"phone", "looking_down"},   20.0, "_combo_phone_down"),
+            ({"looking_down", "book"},  S.COMBO_DOWN_BOOK,  "_combo_down_book"),
+            ({"phone", "looking_down"}, S.COMBO_PHONE_DOWN, "_combo_phone_down"),
         ]
         for combo_set, bonus, cd_key in combos:
             if key in combo_set and combo_set.issubset(self._active_set):
                 if now >= self._combo_cooldowns.get(cd_key, 0.0):
-                    eff_conf = max(confidence, _MIN_CONF)
+                    eff_conf = max(confidence, S.MIN_CONF)
                     self._add(bonus * eff_conf, decaying=True)
                     self._combo_cooldowns[cd_key] = now + 60.0
 
@@ -442,7 +419,7 @@ class RiskEngine:
         """Decay only the decaying bucket. Records every tick in decay_log."""
         if now - self._last_decay_time >= self._decay_interval:
             before  = self._decaying_score
-            self._decaying_score = max(0.0, self._decaying_score - 5.0)
+            self._decaying_score = max(0.0, self._decaying_score - S.DECAY_AMOUNT)
             after   = self._decaying_score
             elapsed = now - self._creation_time
             m, s    = divmod(int(elapsed), 60)
@@ -461,11 +438,11 @@ class RiskEngine:
             self.state = ExamState.TERMINATED
             return
         s = self.score
-        if s >= _T_ADMIN:
+        if s >= S.STATE_ADMIN:
             self.state = ExamState.ADMIN_REVIEW
-        elif s >= _T_HIGH_RISK:
+        elif s >= S.STATE_HIGH_RISK:
             self.state = ExamState.HIGH_RISK
-        elif s >= _T_WARNING:
+        elif s >= S.STATE_WARNING:
             self.state = ExamState.WARNING
         else:
             self.state = ExamState.NORMAL

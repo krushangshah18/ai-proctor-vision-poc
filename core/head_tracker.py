@@ -1,5 +1,18 @@
-import time 
+import time
 import cv2
+
+# Per-key y-positions so multiple active timers stack vertically without overlap
+_TIMER_Y: dict[str, int] = {
+    "looking_away" : 230,
+    "looking_down"  : 255,
+    "looking_up"    : 280,
+    "looking_side"  : 305,
+    "face_hidden"   : 330,
+    "partial_face"  : 355,
+    "fake_presence" : 380,
+}
+_TIMER_Y_DEFAULT_START = 230
+_TIMER_Y_STEP          = 25
 
 #handles Time based behavior
 class HeadTracker:
@@ -30,10 +43,11 @@ class HeadTracker:
 
         if self.DEBUG and this_state["start_time"]:
             elapsed = now - this_state["start_time"]
+            y = _TIMER_Y.get(key, _TIMER_Y_DEFAULT_START)
             cv2.putText(
                     frame,
                     f"{label}: {elapsed:.1f}s",
-                    (20, 200),
+                    (20, y),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
                     (0, 0, 255),

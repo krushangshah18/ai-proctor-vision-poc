@@ -1,14 +1,13 @@
 """
-AlertEngine — decides warn vs API-alert based on RiskEvent from RiskEngine.
+AlertEngine — routes RiskEvent to warn or alert.
 
-Design:
-  - warn()  : soft on-screen amber message. No logging. No API call.
-              Shown on first occurrence (before risk kicks in).
-  - alert() : hard red on-screen + API call + frame snapshot saved as proof.
-              Fires only when risk was actually scored AND API cooldown elapsed.
+Rule:
+  risk_added == 0  →  warn()   soft amber banner, no log, no score impact
+  risk_added  > 0  →  alert()  red banner + API log + snapshot
 
-Speaking (video lip detection) is WARN-ONLY — never triggers an API alert
-and never interacts with the risk score. Audio events handle scored speaking.
+Grace (occ=1 of occurrence-based events) is enforced in RiskEngine by arming
+the score cooldown without adding score — so AlertEngine always sees
+risk_added=0 during grace and routes it to warn automatically.
 """
 
 import cv2
@@ -16,67 +15,8 @@ import os
 import time
 from datetime import datetime
 
+import settings.alerts as A
 from .risk_engine import RiskEvent
-
-
-# Events that only ever produce a soft warning — no API call, no score impact.
-_WARN_ONLY = {"speaking"}
-
-# How many occurrences are "warning-only" before the first API alert is allowed.
-# 0  = alert allowed from first occurrence (if risk_added > 0).
-# 1  = first occurrence is always a warning, API alert from second onward.
-_WARN_FIRST_N: dict[str, int] = {
-    "phone"          : 1,
-    "multiple_people": 1,
-    "headphone"      : 1,
-    "earbud"         : 1,
-    "fake_presence"  : 1,   # first detection zone is warning (duration < 15s)
-    "face_hidden"    : 1,   # first detection zone is warning (duration < 5s)
-    "looking_away"   : 1,
-    "looking_down"   : 1,
-    "looking_up"     : 1,
-    "looking_side"   : 1,
-    "partial_face"   : 0,
-    "book"           : 0,
-    "no_person"      : 0,
-}
-
-# Warn cooldowns: minimum seconds between consecutive soft warnings for the same key.
-# Prevents warning spam when a condition flickers (e.g. speaking oscillating on/off).
-_WARN_COOLDOWNS: dict[str, float] = {
-    "speaking"       : 15,
-    "fake_presence"  : 15,
-    "looking_away"   : 10,
-    "looking_down"   : 10,
-    "looking_up"     : 10,
-    "looking_side"   : 10,
-    "partial_face"   : 10,
-    "face_hidden"    :  8,
-    "phone"          :  5,
-    "multiple_people":  5,
-    "no_person"      :  5,
-    "book"           :  5,
-    "headphone"      :  5,
-    "earbud"         :  5,
-}
-
-# API-alert cooldowns: minimum seconds between consecutive API alerts for the same key.
-# Much longer than risk-scoring cooldowns — prevents spam while score still accumulates.
-_API_COOLDOWNS: dict[str, float] = {
-    "looking_away"   : 45,
-    "looking_down"   : 45,
-    "looking_up"     : 45,
-    "looking_side"   : 45,
-    "partial_face"   : 90,
-    "face_hidden"    : 30,
-    "fake_presence"  : 60,
-    "phone"          : 60,
-    "book"           : 120,
-    "headphone"      : 180,
-    "earbud"         :  60,
-    "multiple_people": 30,
-    "no_person"      : 30,
-}
 
 
 class AlertEngine:
@@ -97,10 +37,6 @@ class AlertEngine:
         # Warn cooldowns: key → earliest wall-time for next soft warning
         self._warn_cooldown_until: dict[str, float] = {}
 
-        # Whether we have already shown the soft warning in the current active period.
-        # Resets on each rising edge (is_new_occurrence).
-        self._warned_this_period: dict[str, bool] = {}
-
         # Set after each handle() call — caller uses these to enrich the log entry.
         self.last_snapshot_path: str | None = None
         self.last_risk_added:    float      = 0.0
@@ -120,13 +56,13 @@ class AlertEngine:
 
         key = event.key
 
-        # ── Terminated state ──────────────────────────────────────────────────
+        # ── Terminated ────────────────────────────────────────────────────────
         if event.terminated:
             alert_manager.alert(f"EXAM TERMINATED: {event.termination_reason}")
             self.last_snapshot_path = self._save_snapshot("terminated", frame, time.time())
             return
 
-        # ── Inactive event: nothing to show ───────────────────────────────────
+        # ── Inactive: nothing to show ─────────────────────────────────────────
         if not event.active and not event.is_new_occurrence:
             return
 
@@ -135,64 +71,24 @@ class AlertEngine:
         alert_msg = state.get("alert_message", key)
         now       = time.time()
 
-        # ── Reset warn flag on new active period ──────────────────────────────
-        if event.is_new_occurrence:
-            self._warned_this_period[key] = False
-
-        # ── WARN-ONLY events (video speaking) — never escalate ────────────────
-        if key in _WARN_ONLY:
-            if not self._warned_this_period.get(key) and self._warn_ok(key, now):
-                alert_manager.warn(warn_msg)
-                self._warned_this_period[key] = True
-                self._arm_warn_cooldown(key, now)
-            return
-
-        # ── First-N occurrences are warnings only ─────────────────────────────
-        warn_n = _WARN_FIRST_N.get(key, 0)
-        if event.occurrence_count <= warn_n:
-            if not self._warned_this_period.get(key) and self._warn_ok(key, now):
-                alert_manager.warn(warn_msg)
-                self._warned_this_period[key] = True
-                self._arm_warn_cooldown(key, now)
-            return
-
-        # ── Duration-zone warning (risk engine returned 0 — still building up) -
-        # Show an amber warning while the event is in its warning zone
-        # (e.g. face_hidden 2–5s, fake_presence < 15s).
+        # ── No score added → WARNING ──────────────────────────────────────────
+        # Covers: grace period (occ=1, cooldown armed in engine with no score),
+        #         score cooldown active, duration gate not yet met.
         if event.risk_added == 0:
-            if event.is_new_occurrence and not self._warned_this_period.get(key) \
-                    and self._warn_ok(key, now):
+            if self._warn_ok(key, now):
                 alert_manager.warn(warn_msg)
-                self._warned_this_period[key] = True
                 self._arm_warn_cooldown(key, now)
             return
 
-        # ── Risk was scored → candidate for API alert ─────────────────────────
-        api_cd   = _API_COOLDOWNS.get(key, 60)
-        api_due  = self._api_cooldown_until.get(key, 0.0)
-
+        # ── Score added → ALERT ───────────────────────────────────────────────
+        # api_cooldown == score_cooldown so this fires on every scoring event.
+        api_due = self._api_cooldown_until.get(key, 0.0)
         if now >= api_due:
-            # Fire API alert
-            alert_manager.alert(alert_msg)
-            self._api_cooldown_until[key] = now + api_cd
+            score_tag = f"  [+{event.risk_added:.0f} pts]"
+            alert_manager.alert(f"{alert_msg}{score_tag}")
+            self._api_cooldown_until[key] = now + A.API_COOLDOWNS.get(key, 10)
             self.last_risk_added    = event.risk_added
-
-            # Save frame snapshot as proof
             self.last_snapshot_path = self._save_snapshot(key, frame, now)
-        # else: risk scored but API is in cooldown — score accumulates silently
-
-    def handle_audio_alert(self, label: str, confidence: float,
-                            risk_added: float, frame, alert_manager) -> None:
-        """
-        Convenience method for audio proctoring events.
-        These always fire an API alert (caller already enforces audio API cooldown).
-        Saves frame snapshot as proof.
-        """
-        self.last_snapshot_path = None
-        self.last_risk_added    = risk_added
-        alert_manager.alert(f"[AUDIO] {label} ({confidence:.0%})")
-        now = time.time()
-        self.last_snapshot_path = self._save_snapshot("audio", frame, now)
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
@@ -201,7 +97,7 @@ class AlertEngine:
         return now >= self._warn_cooldown_until.get(key, 0.0)
 
     def _arm_warn_cooldown(self, key: str, now: float) -> None:
-        cd = _WARN_COOLDOWNS.get(key, 5.0)
+        cd = A.WARN_COOLDOWNS.get(key, 5.0)
         self._warn_cooldown_until[key] = now + cd
 
     def _save_snapshot(self, key: str, frame, now: float) -> str | None:

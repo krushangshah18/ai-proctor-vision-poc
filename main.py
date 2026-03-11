@@ -1,40 +1,15 @@
 import cv2
 import json
 import os
-import queue
-import threading
 import time
 from datetime import datetime
 
 import numpy as np
-import sounddevice as sd
-import soundfile as sf
-import noisereduce as nr
 
 from config import *
 from utils import AlertManager, draw_alerts, draw_detections
 from detectors import ObjectDetector, merge_by_class, HeadPoseDetector
 from core import AlertEngine, HeadTracker, LivenessDetector, ObjectTemporalTracker, RiskEngine, ExamState
-from core.audio_proctoring import ProctorSession, CheatType
-
-# ── Audio event registry ─────────────────────────────────────────────────────
-# (label, base_risk_score)
-# Risk = base_score × confidence  (always goes into the decaying bucket)
-# Speaking risk comes ONLY from audio analysis — video lip detection is warn-only.
-_AUDIO_EVENTS: dict[CheatType, tuple[str, float]] = {
-    CheatType.IMPERSONATION  : ("Voice impersonation detected",      60.0),
-    CheatType.GHOST_VOICE    : ("Ghost voice / pre-recorded audio",  50.0),
-    CheatType.EXTRA_SPEAKER  : ("Extra speaker detected",            40.0),
-    CheatType.VOICE_MISMATCH : ("Voice mismatch with enrolled user", 40.0),
-}
-
-# Per-audio-event API cooldowns (seconds between consecutive alerts of same type)
-_AUDIO_API_COOLDOWNS: dict[CheatType, float] = {
-    CheatType.IMPERSONATION  : 120,
-    CheatType.GHOST_VOICE    : 120,
-    CheatType.EXTRA_SPEAKER  :  60,
-    CheatType.VOICE_MISMATCH :  60,
-}
 
 # State overlay colours (BGR)
 _STATE_COLORS = {
@@ -144,26 +119,33 @@ def _draw_partial_face_banner(frame: np.ndarray) -> None:
 
 # ── Report ────────────────────────────────────────────────────────────────────
 
-def _save_report(session_start: float, alert_log: list,
-                 audio_summary: dict, risk_summary: dict) -> None:
+def _save_report(session_start: float, alert_log: list, warning_log: list,
+                 risk_summary: dict) -> None:
     if not SAVE_REPORT:
         return
     os.makedirs(REPORT_DIR, exist_ok=True)
 
     end_time = time.time()
-    summary: dict[str, int] = {}
+    alert_summary: dict[str, int] = {}
     for entry in alert_log:
         k = entry["message"].split("(")[0].strip()
-        summary[k] = summary.get(k, 0) + 1
+        alert_summary[k] = alert_summary.get(k, 0) + 1
+
+    warn_summary: dict[str, int] = {}
+    for entry in warning_log:
+        k = entry["message"]
+        warn_summary[k] = warn_summary.get(k, 0) + 1
 
     report = {
         "session_start"    : datetime.fromtimestamp(session_start).strftime("%Y-%m-%d %H:%M:%S"),
         "session_end"      : datetime.fromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S"),
         "duration_s"       : round(end_time - session_start, 1),
         "total_api_alerts" : len(alert_log),
-        "alert_summary"    : summary,
+        "total_warnings"   : len(warning_log),
+        "alert_summary"    : alert_summary,
+        "warning_summary"  : warn_summary,
         "alert_log"        : alert_log,
-        "audio"            : audio_summary,
+        "warning_log"      : warning_log,
         "risk"             : risk_summary,
     }
 
@@ -192,9 +174,10 @@ def main():
 
     session_start = time.time()
 
-    # alert_log only contains HARD API alerts (not soft warnings).
-    # Each entry: {time, elapsed_s, message, snapshot_path}
-    alert_log: list[dict] = []
+    # alert_log  — hard API alerts only (red, logged, snapshot saved)
+    # warning_log — soft warnings (amber, first-occurrence notices)
+    alert_log:   list[dict] = []
+    warning_log: list[dict] = []
 
     # ── States dict ──────────────────────────────────────────────────────────
     # warn_message  → amber on-screen, not logged
@@ -265,12 +248,6 @@ def main():
             "warn_message" : "No movement detected — please move slightly",
             "alert_message": "Possible fake presence (static image)",
         },
-        "speaking": {
-            # WARN-ONLY: video lip detection.
-            # Audio proctoring events handle scored speaking violations.
-            "active": False, "last_alert": 0, "start_time": None,
-            "warn_message": "Candidate may be speaking",
-        },
     }
 
     # ── Alert manager ─────────────────────────────────────────────────────────
@@ -289,9 +266,18 @@ def main():
             entry["snapshot"] = snapshot_path
         alert_log.append(entry)
 
-    # Wire: AlertManager.alert() → _on_api_alert (no snapshot from here,
-    # snapshot path is injected by AlertEngine after saving)
+    def _on_warn_notice(message: str) -> None:
+        elapsed = time.time() - session_start
+        m, s    = divmod(int(elapsed), 60)
+        warning_log.append({
+            "time"     : f"{m:02d}:{s:02d}",
+            "elapsed_s": round(elapsed, 1),
+            "message"  : message,
+        })
+
+    # Wire: AlertManager callbacks → report logs
     alert_manager.on_alert = lambda msg: _on_api_alert(msg)
+    alert_manager.on_warn  = lambda msg: _on_warn_notice(msg)
 
     # ── Components ────────────────────────────────────────────────────────────
     snapshot_dir   = os.path.join(REPORT_DIR, "snapshots")
@@ -315,73 +301,6 @@ def main():
             entry["score_added"] = round(alert_engine.last_risk_added, 2)
         if alert_engine.last_snapshot_path:
             entry["snapshot"] = alert_engine.last_snapshot_path
-
-    # ── Audio proctoring setup ────────────────────────────────────────────────
-    proctor_session    = ProctorSession(sample_rate=AUDIO_SR)
-    audio_chunk_q: queue.Queue = queue.Queue(maxsize=100)
-    audio_event_q: queue.Queue = queue.Queue()
-    stop_audio         = threading.Event()
-    recorded_chunks: list      = []
-    _audio_last_api: dict[CheatType, float] = {}
-
-    _NOISE_PROFILE_CHUNKS = int(0.5 * AUDIO_SR / AUDIO_CHUNK)
-    _noise_buf: list          = []
-    _noise_profile: np.ndarray | None = None
-
-    def _denoise(chunk: np.ndarray) -> np.ndarray:
-        nonlocal _noise_profile
-        if _noise_profile is None:
-            return chunk
-        return nr.reduce_noise(y=chunk, sr=AUDIO_SR,
-                               y_noise=_noise_profile,
-                               stationary=True, prop_decrease=0.85).astype(np.float32)
-
-    def _audio_sd_callback(indata, frames, time_info, status):  # noqa: ARG001
-        try:
-            audio_chunk_q.put_nowait(indata[:, 0].copy())
-        except queue.Full:
-            pass
-
-    def _audio_worker():
-        nonlocal _noise_profile
-        while not stop_audio.is_set():
-            try:
-                chunk = audio_chunk_q.get(timeout=0.1)
-                if _noise_profile is None:
-                    _noise_buf.append(chunk)
-                    if len(_noise_buf) >= _NOISE_PROFILE_CHUNKS:
-                        _noise_profile = np.concatenate(_noise_buf)
-                        print(f"[Audio] Noise profile captured "
-                              f"({len(_noise_profile)/AUDIO_SR:.2f}s)")
-                    recorded_chunks.append(chunk)
-                    continue
-                clean = _denoise(chunk)
-                recorded_chunks.append(clean)
-                for ev in proctor_session.push(clean):
-                    audio_event_q.put(ev)
-            except queue.Empty:
-                continue
-
-    if DETECT_AUDIO:
-        try:
-            enroll_audio, enroll_sr = sf.read(ENROLLMENT_WAV, dtype="float32")
-            if enroll_audio.ndim > 1:
-                enroll_audio = enroll_audio[:, 0]
-            enroll_audio = nr.reduce_noise(y=enroll_audio, sr=enroll_sr,
-                                           stationary=True,
-                                           prop_decrease=0.85).astype(np.float32)
-            proctor_session.enroll(enroll_audio, sr=enroll_sr)
-            print(f"[Audio] Enrolled from {ENROLLMENT_WAV} "
-                  f"({len(enroll_audio)/enroll_sr:.1f}s @ {enroll_sr}Hz)")
-        except FileNotFoundError:
-            print(f"[Audio] {ENROLLMENT_WAV} not found — audio proctoring disabled")
-        except ValueError as e:
-            print(f"[Audio] Enrollment failed: {e}")
-
-        audio_stream = sd.InputStream(samplerate=AUDIO_SR, channels=1, dtype="float32",
-                                      blocksize=AUDIO_CHUNK, callback=_audio_sd_callback)
-        audio_stream.start()
-        threading.Thread(target=_audio_worker, daemon=True).start()
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     while True:
@@ -416,7 +335,6 @@ def main():
             partial_face,
             yaw, pitch, gaze,
             _, blinked, _,
-            speaking,
         ) = head_detector.detect(frame, draw=DRAW_HEAD_POSE)
 
         # ── Liveness ──────────────────────────────────────────────────────────
@@ -449,7 +367,6 @@ def main():
             "face_hidden"  : (face_hidden_cond,              DETECT_FACE_HIDDEN),
             "partial_face" : (partial_face,                  DETECT_PARTIAL_FACE),
             "fake_presence": (fake,                          DETECT_FAKE_PRESENCE),
-            "speaking"     : (speaking,                      DETECT_SPEAKING),
         }
 
         partial_face_triggered = False
@@ -458,9 +375,7 @@ def main():
                 continue
 
             # Duration gate: HeadTracker returns True only after threshold
-            if key == "speaking":
-                t = SPEAKING_THRESHOLD
-            elif key == "looking_side":
+            if key == "looking_side":
                 t = GAZE_THRESHOLD
             else:
                 t = None
@@ -473,8 +388,6 @@ def main():
             dur = _get_duration(states, key) if triggered else 0.0
 
             # Risk engine: score update + occurrence tracking (single source of truth)
-            # speaking is passed but RiskEngine has no policy for it — AlertEngine
-            # intercepts it as WARN_ONLY before any scoring happens.
             rev = risk.process_event(key, triggered, confidence=1.0, duration=dur)
 
             # Alert engine: decide warn vs API-alert, save snapshot
@@ -509,35 +422,6 @@ def main():
         if alert_engine.last_snapshot_path and alert_log:
             alert_log[-1]["snapshot"] = alert_engine.last_snapshot_path
 
-        # ── Audio events: score (decaying) + API alert + snapshot ─────────────
-        if DETECT_AUDIO:
-            proctor_session.update_lip_activity(speaking)
-
-            while not audio_event_q.empty():
-                try:
-                    ev = audio_event_q.get_nowait()
-                except queue.Empty:
-                    break
-
-                label, base_score = _AUDIO_EVENTS.get(
-                    ev.event_type, (f"Audio: {ev.event_type.name}", 30.0)
-                )
-                api_cd   = _AUDIO_API_COOLDOWNS.get(ev.event_type, 60)
-                last_api = _audio_last_api.get(ev.event_type, 0.0)
-
-                if (now - last_api) >= api_cd:
-                    # Add to decaying risk bucket first
-                    added = risk.add_audio_risk(base_score, ev.confidence)
-                    if added > 0:
-                        # Fire API alert + save proof snapshot
-                        alert_engine.handle_audio_alert(
-                            label, ev.confidence, added, frame, alert_manager
-                        )
-                        _audio_last_api[ev.event_type] = now
-                        # Attach snapshot to log entry
-                        if alert_engine.last_snapshot_path and alert_log:
-                            alert_log[-1]["snapshot"] = alert_engine.last_snapshot_path
-
         # ── Drawing ───────────────────────────────────────────────────────────
         if DRAW_OBJECTS:
             draw_detections(frame, detections)
@@ -560,25 +444,10 @@ def main():
             break
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
-    audio_summary = {}
-    if DETECT_AUDIO:
-        stop_audio.set()
-        audio_stream.stop()
-        audio_stream.close()
-
-        if recorded_chunks:
-            recording = np.concatenate(recorded_chunks)
-            sf.write("session_recording.wav", recording, AUDIO_SR)
-            print(f"[Audio] Session saved → session_recording.wav "
-                  f"({len(recording)/AUDIO_SR:.1f}s)")
-
-        audio_summary = proctor_session.get_summary()
-        audio_summary.pop("cheat_events", None)
-
     cap.release()
     cv2.destroyAllWindows()
 
-    _save_report(session_start, alert_log, audio_summary, risk.get_summary())
+    _save_report(session_start, alert_log, warning_log, risk.get_summary())
 
 
 if __name__ == "__main__":

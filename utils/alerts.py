@@ -1,6 +1,8 @@
 from collections import deque
 import time
 
+from settings.alerts import WARN_DISPLAY_DURATION, ALERT_DISPLAY_DURATION
+
 
 class AlertManager:
     """
@@ -13,14 +15,16 @@ class AlertManager:
                  Treat as a backend API call — rate-limit via AlertEngine.
     """
 
-    def __init__(self, warn_duration: float = 3.0, alert_duration: float = 5.0):
+    def __init__(self, warn_duration: float = WARN_DISPLAY_DURATION,
+                 alert_duration: float = ALERT_DISPLAY_DURATION):
         self._warnings: deque = deque()
         self._alerts:   deque = deque()
         self.warn_duration  = warn_duration
         self.alert_duration = alert_duration
 
-        # Set this to a callable(message) to capture alerts for the session report.
+        # Set this to a callable(message) to capture alerts/warnings for the session report.
         self.on_alert = None
+        self.on_warn  = None
 
     # ── Public write API ───────────────────────────────────────────────────
 
@@ -33,8 +37,10 @@ class AlertManager:
         for entry in self._warnings:
             if entry["message"] == message:
                 entry["timestamp"] = now
-                return
+                return   # duplicate — refresh only, don't log again
         self._warnings.append({"message": message, "timestamp": now})
+        if self.on_warn:
+            self.on_warn(message)
 
     def alert(self, message: str) -> None:
         """On-screen hard alert + triggers on_alert callback (= API / report log)."""

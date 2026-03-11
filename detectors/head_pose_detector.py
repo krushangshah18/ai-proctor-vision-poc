@@ -2,14 +2,11 @@ import cv2
 import math
 import mediapipe as mp
 
-from collections import deque
 import numpy as np
 from config import (
     LOOK_AWAY_YAW, LOOK_DOWN_PITCH, LOOK_UP_PITCH,
     GAZE_LEFT, GAZE_RIGHT,
     EAR_THRESHOLD, BLINK_FRAMES,
-    MAR_VAR_THRESHOLD, MAR_VEL_THRESHOLD, MAR_OSC_THRESHOLD,
-    MAR_YAWN_THRESHOLD, SILENCE_VEL_THRESHOLD, SPEAKING_HOLD_FRAMES,
     MIN_FACE_WIDTH, MIN_FACE_HEIGHT,
 )
 
@@ -64,27 +61,6 @@ class HeadPoseDetector:
         self.GAZE_LEFT       = GAZE_LEFT
         self.GAZE_RIGHT      = GAZE_RIGHT
 
-        # Lips
-        self.UPPER_LIP = 13
-        self.LOWER_LIP = 14
-        self.LEFT_MOUTH = 61
-        self.RIGHT_MOUTH = 291
-
-        # Speaking detection buffers
-        self.mar_history = deque(maxlen=20)   # main window (~667ms @ 30fps)
-        self.mar_velocity = deque(maxlen=20)
-        self.recent_velocity = deque(maxlen=6)  # short window for fast stop detection
-
-        self.prev_mar = None
-
-        # Speaking / lip thresholds — sourced from config.py
-        self.MAR_VAR_THRESHOLD    = MAR_VAR_THRESHOLD
-        self.MAR_VEL_THRESHOLD    = MAR_VEL_THRESHOLD
-        self.MAR_OSC_THRESHOLD    = MAR_OSC_THRESHOLD
-        self.MAR_YAWN_THRESHOLD   = MAR_YAWN_THRESHOLD
-        self.SILENCE_VEL_THRESHOLD = SILENCE_VEL_THRESHOLD
-        self.SPEAKING_HOLD_FRAMES = SPEAKING_HOLD_FRAMES
-        self._speaking_hold = 0
     
 
     # Utility Functions
@@ -113,7 +89,7 @@ class HeadPoseDetector:
         #no face detected
         if not results.multi_face_landmarks:
             self.blink_counter = 0
-            return (False, False, False, False, False, False,0.0, 0.0, 0.0,0,False,0, False)
+            return (False, False, False, False, False, False, 0.0, 0.0, 0.0, 0, False, 0)
         
         """
         multi_face_landmarks → list of faces
@@ -200,76 +176,6 @@ class HeadPoseDetector:
 
             self.blink_counter = 0
 
-        #lips
-        upper_lip = (int(landmarks[self.UPPER_LIP].x * w),
-             int(landmarks[self.UPPER_LIP].y * h))
-
-        lower_lip = (int(landmarks[self.LOWER_LIP].x * w),
-                    int(landmarks[self.LOWER_LIP].y * h))
-
-        left_mouth = (int(landmarks[self.LEFT_MOUTH].x * w),
-                    int(landmarks[self.LEFT_MOUTH].y * h))
-
-        right_mouth = (int(landmarks[self.RIGHT_MOUTH].x * w),
-                    int(landmarks[self.RIGHT_MOUTH].y * h))
-
-        vertical = self._dist(upper_lip, lower_lip)
-        horizontal = self._dist(left_mouth, right_mouth)
-
-        mar = vertical / (horizontal + 1e-6)
-        # ---------- SPEAKING DETECTION ----------
-
-        self.mar_history.append(mar)
-
-        if self.prev_mar is None:
-            velocity = 0
-        else:
-            velocity = abs(mar - self.prev_mar)
-
-        self.mar_velocity.append(velocity)
-        self.recent_velocity.append(velocity)
-        self.prev_mar = mar
-
-        raw_speaking = False
-        variance = 0
-        vel_mean = 0
-        zero_crossings = 0
-
-        if len(self.mar_history) == self.mar_history.maxlen:
-
-            mar_arr = np.array(self.mar_history)
-
-            # 1. mouth oscillation strength
-            variance = np.var(mar_arr)
-
-            # 2. lip velocity
-            vel_mean = np.mean(self.mar_velocity)
-
-            # 3. oscillation count
-            mean_mar = np.mean(mar_arr)
-            centered = mar_arr - mean_mar
-            zero_crossings = np.sum(np.diff(np.sign(centered)) != 0)
-
-            cond_var = variance > self.MAR_VAR_THRESHOLD
-            cond_vel = vel_mean > self.MAR_VEL_THRESHOLD
-            cond_osc = zero_crossings >= self.MAR_OSC_THRESHOLD
-            # yawn guard: mouth wide open (high mean MAR) → not speech
-            cond_not_yawn = mean_mar < self.MAR_YAWN_THRESHOLD
-
-            raw_speaking = cond_not_yawn and cond_var and (cond_vel or cond_osc)
-
-        # fast stop: if recent lip velocity has gone silent, drop hold immediately
-        if len(self.recent_velocity) == self.recent_velocity.maxlen:
-            if np.mean(self.recent_velocity) < self.SILENCE_VEL_THRESHOLD:
-                self._speaking_hold = 0
-
-        if raw_speaking:
-            self._speaking_hold = self.SPEAKING_HOLD_FRAMES
-        elif self._speaking_hold > 0:
-            self._speaking_hold -= 1
-
-        speaking = raw_speaking or self._speaking_hold > 0
-
         if draw and self.DEBUG:
             #Nose
             cv2.circle(frame, nose, 4, (0,255,255), -1)
@@ -301,41 +207,37 @@ class HeadPoseDetector:
                 2
             )
 
-            #Yaw Text
-            cv2.putText(frame, f"Yaw: {yaw_ratio:.2f}",
-                                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                    (0,255,0) if not looking_away else (0,0,255), 2)
+            # #Yaw Text
+            # cv2.putText(frame, f"Yaw: {yaw_ratio:.2f}",
+            #                         (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            #                         (0,255,0) if not looking_away else (0,0,255), 2)
 
-            #pitch text
-            cv2.putText(frame, f"Pitch: {pitch_ratio:.2f}",
-                        (20,110), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0,255,0), 2)
+            # #pitch text
+            # cv2.putText(frame, f"Pitch: {pitch_ratio:.2f}",
+            #             (20,110), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            #             (0,255,0), 2)
 
-            #Gaze text
-            cv2.putText(frame, f"Gaze: {gaze_ratio:.2f}",
-                        (20,140), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0,255,0), 2)
+            # #Gaze text
+            # cv2.putText(frame, f"Gaze: {gaze_ratio:.2f}",
+            #             (20,140), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            #             (0,255,0), 2)
 
             # EAR + Blink info
             cv2.putText(frame, f"EAR: {ear:.2f} | Blinks: {self.total_blinks}",
                         (20,170), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255,0,255), 2)
 
-            cv2.putText(frame, f"MAR:{mar:.2f}",
-                        (20,200), cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
+            # cv2.putText(frame, f"MAR:{mar:.2f}",
+            #             (20,200), cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
 
-            cv2.putText(frame, f"Var:{variance:.4f}",
-                        (20,220), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+            # cv2.putText(frame, f"Var:{variance:.4f}",
+            #             (20,220), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
 
-            cv2.putText(frame, f"Vel:{vel_mean:.3f}",
-                        (20,240), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+            # cv2.putText(frame, f"Vel:{vel_mean:.3f}",
+            #             (20,240), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
 
-            cv2.putText(frame, f"Osc:{zero_crossings}",
-                        (20,260), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
-
-            cv2.putText(frame, f"Speaking:{speaking}",
-                        (20,280), cv2.FONT_HERSHEY_SIMPLEX,0.7,
-                        (0,0,255) if speaking else (0,255,0),2)
+            # cv2.putText(frame, f"Osc:{zero_crossings}",
+            #             (20,260), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
 
         return (
             looking_away,
@@ -350,5 +252,4 @@ class HeadPoseDetector:
             ear,
             blinked,
             self.total_blinks,
-            speaking
         )
