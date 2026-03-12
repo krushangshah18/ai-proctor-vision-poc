@@ -86,26 +86,24 @@ def merge_by_class(detections, classes, iou_threshold=0.5):
 
 
 class ObjectDetector:
-    def __init__(self, 
+    def __init__(self,
                  cheat_model="finalBestV5.pt",
-
-                 default_conf=0.5, 
+                 default_conf=0.5,
                  person_conf=0.3,
-                 book_conf=0.7,
                  phone_conf=0.65,
+                 book_conf=0.70,
                  audio_conf=0.41,
                  ):
 
         self.cheat_model = YOLO(cheat_model)
 
-        # Thresholds
         self.default_conf = default_conf
-        self.person_conf = person_conf
+        self.person_conf  = person_conf
         self.class_thresholds = {
             "cell_phone": phone_conf,
-            "book": book_conf,
-            "headphone": audio_conf,
-            "earbud": audio_conf,
+            "book"      : book_conf,
+            "headphone" : audio_conf,
+            "earbud"    : audio_conf,
         }
 
     def _run_model(self, model, frame, allowed_classes, default_conf):

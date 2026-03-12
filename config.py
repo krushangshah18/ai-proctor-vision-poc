@@ -86,6 +86,13 @@ AUDIO_CHUNK_SAMPLES = 512
 AUDIO_SPEECH_THRESH = 0.5
 SPEAKER_HOLD_S      = 1.5
 
+# ── Object Detection (YOLO confidence thresholds) ────────────────────────────
+YOLO_DEFAULT_CONF = 0.50   # fallback for any class not listed below
+YOLO_PERSON_CONF  = 0.30   # lower — person detection should be sensitive
+YOLO_PHONE_CONF   = 0.65
+YOLO_BOOK_CONF    = 0.70
+YOLO_AUDIO_CONF   = 0.41   # shared by headphone + earbud
+
 # ── Object Detection (temporal stability) ────────────────────────────────────
 OBJECT_WINDOW    = 15   # rolling frame window
 OBJECT_MIN_VOTES = 5    # object must appear in N of last OBJECT_WINDOW frames

@@ -232,7 +232,13 @@ def main():
     os.makedirs(session_dir, exist_ok=True)
 
     # ── Components ────────────────────────────────────────────────────────────
-    detector     = ObjectDetector()
+    detector     = ObjectDetector(
+        default_conf=YOLO_DEFAULT_CONF,
+        person_conf=YOLO_PERSON_CONF,
+        phone_conf=YOLO_PHONE_CONF,
+        book_conf=YOLO_BOOK_CONF,
+        audio_conf=YOLO_AUDIO_CONF,
+    )
     head_detector = HeadPoseDetector(DEBUG)
     lip_detector  = LipDetector()
     obj_tracker  = ObjectTemporalTracker(
