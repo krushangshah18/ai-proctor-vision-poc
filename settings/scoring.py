@@ -92,21 +92,34 @@ GAZE_SCORE      : float =  5.0
 # ── Speaker audio — speech without lip movement ────────────────────────────────
 # All speaker audio knobs live here (scoring + alert cooldowns in one place).
 #
-# Timeline (timer resets to 0 if audio goes silent for > flicker_grace_s):
-#   0 – WARN_DURATION   → warn only, repeated every WARN_COOLDOWN seconds
-#   at WARN_DURATION    → alert  +SCORE_1 fixed  (one-time per episode)
-#   at SCORE_2_AT       → alert  +SCORE_2 fixed  (one-time per episode)
-#   every TAIL_INTERVAL → alert  +SCORE_TAIL fixed  (repeating until silence)
+# Each TRUE episode (silence > flicker_grace_s = new episode) uses the tier
+# matching its episode number.  Tier gates reset between episodes so each
+# episode starts fresh; escalation is handled by the episode-number tier.
+#
+# Episode 1:
+#   0 – OCC1_WARN_S        → warn only, every WARN_COOLDOWN seconds
+#   at OCC1_WARN_S         → alert  +OCC1_SCORE  decaying  (one-time)
+#   every REPEAT_INTERVAL  → alert  +OCC1_REPEAT fixed     (repeating)
+#
+# Episode 2+ :
+#   0 – OCC2_WARN_S        → warn only, every WARN_COOLDOWN seconds
+#   at OCC2_WARN_S         → alert  +OCC2_SCORE  fixed     (one-time)
+#   every REPEAT_INTERVAL  → alert  +OCC2_REPEAT fixed     (repeating)
 
-SPEAKER_WARN_DURATION : float =  3.0   # seconds of grace before first score
-SPEAKER_WARN_COOLDOWN : float =  3.0   # warn repeats this often during grace window
+SPEAKER_WARN_COOLDOWN   : float =  3.0   # warn repeat cadence during grace window
+SPEAKER_ALERT_COOLDOWN  : float = 10.0   # min gap between alert banners (= REPEAT_INTERVAL)
 
-SPEAKER_SCORE_1       : float = 10.0   # score added at WARN_DURATION
-SPEAKER_SCORE_2_AT    : float = 13.0   # seconds until second score
-SPEAKER_SCORE_2       : float = 25.0   # score added at SCORE_2_AT
-SPEAKER_SCORE_TAIL    : float = 15.0   # score added every TAIL_INTERVAL after SCORE_2_AT
-SPEAKER_TAIL_INTERVAL : float = 10.0   # tail repeat cadence (seconds)
-SPEAKER_ALERT_COOLDOWN: float = 10.0   # min gap between alert banners (= TAIL_INTERVAL)
+# Episode 1 tier
+SPEAKER_OCC1_WARN_S     : float =  3.0   # warn-only grace (seconds)
+SPEAKER_OCC1_SCORE      : float = 10.0   # score at end of grace (decaying)
+SPEAKER_OCC1_REPEAT     : float = 20.0   # repeating score every REPEAT_INTERVAL (fixed)
+
+# Episode 2+ tier
+SPEAKER_OCC2_WARN_S     : float =  5.0   # warn-only grace (seconds)
+SPEAKER_OCC2_SCORE      : float = 20.0   # score at end of grace (fixed)
+SPEAKER_OCC2_REPEAT     : float = 20.0   # repeating score every REPEAT_INTERVAL (fixed)
+
+SPEAKER_REPEAT_INTERVAL : float = 10.0   # cadence for all repeating tail scores
 
 # ── Partial face — too far from camera (decaying) ─────────────────────────────
 PARTIAL_FACE_SCORE         : float = 2.0   # score per scoring cooldown tick

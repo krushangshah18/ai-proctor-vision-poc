@@ -106,6 +106,9 @@ class RiskEngine:
         # Speaker audio continuous-presence timer (with flicker grace + full reset)
         self._speaker_since:      Optional[float] = None
         self._speaker_gone_since: Optional[float] = None
+        # True episode counter — increments only on full silence reset (> flicker_grace).
+        # Brief dropouts (flicker grace) do NOT increment this.
+        self._speaker_occ:        int             = 0
 
         # Currently-active event set (for combo detection)
         self._active_set: set[str] = set()
@@ -201,10 +204,13 @@ class RiskEngine:
                 if self._speaker_gone_since is None:
                     self._speaker_gone_since = now
                 elif now - self._speaker_gone_since >= self._flicker_grace_s:
-                    # Reset episode timer only — tier gates survive so re-entries
-                    # skip grace and score sooner (prevents gaming by breaking audio)
+                    # Full silence — end this episode. Increment occ counter and
+                    # clear tier gates so the next episode starts fresh.
                     self._speaker_since      = None
                     self._speaker_gone_since = None
+                    self._speaker_occ       += 1
+                    self._score_cooldown_until.pop("_speaker_t1",     None)
+                    self._score_cooldown_until.pop("_speaker_repeat",  None)
             self._update_state()
             return RiskEvent(key=key, active=False, occurrence_count=occ)
 
@@ -429,25 +435,28 @@ class RiskEngine:
                 self._speaker_since = now
             dur = now - self._speaker_since
 
+            # Pick tier based on true episode count (_speaker_occ).
+            # Episode 1 (_speaker_occ == 0): shorter grace, smaller first score (decaying).
+            # Episode 2+ (_speaker_occ >= 1): longer grace, larger fixed scores.
+            is_first  = (self._speaker_occ == 0)
+            warn_s    = S.SPEAKER_OCC1_WARN_S   if is_first else S.SPEAKER_OCC2_WARN_S
+            score_1   = S.SPEAKER_OCC1_SCORE    if is_first else S.SPEAKER_OCC2_SCORE
+            repeat    = S.SPEAKER_OCC1_REPEAT   if is_first else S.SPEAKER_OCC2_REPEAT
+            decaying1 = is_first   # first-episode threshold score is decaying; rest fixed
+
             speaker_added = 0.0
+            if dur >= warn_s:
+                if not self._in_cooldown("_speaker_t1", now):
+                    # One-time score at end of grace window
+                    speaker_added = self._add(score_1, decaying=decaying1)
+                    self._arm_cooldown("_speaker_t1",    now, override_cd=999999)
+                    self._arm_cooldown("_speaker_repeat", now, override_cd=S.SPEAKER_REPEAT_INTERVAL)
+                elif not self._in_cooldown("_speaker_repeat", now):
+                    # Repeating tail score every REPEAT_INTERVAL
+                    speaker_added = self._add(repeat, decaying=False)
+                    self._arm_cooldown("_speaker_repeat", now, override_cd=S.SPEAKER_REPEAT_INTERVAL)
 
-            if dur >= S.SPEAKER_SCORE_2_AT:
-                if not self._in_cooldown("_speaker_t2", now):
-                    # One-time tier-2 score
-                    speaker_added = self._add(S.SPEAKER_SCORE_2, decaying=False)
-                    self._arm_cooldown("_speaker_t2", now, override_cd=999999)
-                    # Arm tail so it fires TAIL_INTERVAL after this
-                    self._arm_cooldown("_speaker_tail", now, override_cd=S.SPEAKER_TAIL_INTERVAL)
-                elif not self._in_cooldown("_speaker_tail", now):
-                    # Repeating tail
-                    speaker_added = self._add(S.SPEAKER_SCORE_TAIL, decaying=False)
-                    self._arm_cooldown("_speaker_tail", now, override_cd=S.SPEAKER_TAIL_INTERVAL)
-            elif dur >= S.SPEAKER_WARN_DURATION and not self._in_cooldown("_speaker_t1", now):
-                # One-time tier-1 score
-                speaker_added = self._add(S.SPEAKER_SCORE_1, decaying=False)
-                self._arm_cooldown("_speaker_t1", now, override_cd=999999)
-
-            return RiskEvent(key=key, active=True, is_new_occurrence=(occ == 1 and dur < 1),
+            return RiskEvent(key=key, active=True, is_new_occurrence=(dur < 1),
                              occurrence_count=occ, duration=dur,
                              risk_added=speaker_added)
 

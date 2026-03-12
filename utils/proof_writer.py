@@ -61,6 +61,10 @@ class ProofWriter:
         self._pending: list[threading.Thread] = []
         self._ffmpeg = shutil.which("ffmpeg")
 
+    @property
+    def has_ffmpeg(self) -> bool:
+        return self._ffmpeg is not None
+
     # ── Public ────────────────────────────────────────────────────────────────
 
     def push_frame(self, frame: np.ndarray, timestamp: float) -> None:
@@ -149,9 +153,10 @@ class ProofWriter:
         all_frames = self._merge(pre_frames, post)
         if not all_frames:
             return
+        fps = self._actual_fps(all_frames, self._fps)
         h, w = all_frames[0][1].shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(path, fourcc, self._fps, (w, h))
+        out = cv2.VideoWriter(path, fourcc, fps, (w, h))
         for _, frm in all_frames:
             out.write(frm)
         out.release()
@@ -184,12 +189,13 @@ class ProofWriter:
         if not all_frames:
             return
 
+        fps = self._actual_fps(all_frames, self._fps)
         h, w = all_frames[0][1].shape[:2]
         stem  = path.rsplit(".", 1)[0]
         tmp_v = stem + "_tmpv.mp4"
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(tmp_v, fourcc, self._fps, (w, h))
+        out = cv2.VideoWriter(tmp_v, fourcc, fps, (w, h))
         for _, frm in all_frames:
             out.write(frm)
         out.release()
@@ -234,6 +240,18 @@ class ProofWriter:
                 stem + ".wav", audio_raw,
                 audio_monitor.sample_rate, audio_monitor.channels,
             )
+
+    @staticmethod
+    def _actual_fps(
+        frames: list[tuple[float, np.ndarray]], fallback: float
+    ) -> float:
+        """Derive fps from the real wall-clock span of the captured frames."""
+        if len(frames) < 2:
+            return fallback
+        span = frames[-1][0] - frames[0][0]
+        if span < 0.1:
+            return fallback
+        return (len(frames) - 1) / span
 
     @staticmethod
     def _merge(

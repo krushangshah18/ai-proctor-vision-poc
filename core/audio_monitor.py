@@ -106,7 +106,10 @@ class SpeakerAudioDetector:
         face_detected: bool,
         timestamp: float,
     ) -> bool:
-        desync = speech_active and face_detected and not lip_speaking
+        # Flag if audio is active AND (no face visible OR lips not moving).
+        # Covers both: person present but not speaking, and nobody in frame
+        # while audio plays from a device.
+        desync = speech_active and (not face_detected or not lip_speaking)
 
         if desync:
             if self._no_lips_since is None:

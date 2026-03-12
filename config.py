@@ -11,7 +11,7 @@ DEBUG = True
 
 # Debug sub-gates (only active when DEBUG = True)
 DEBUG_BBOX        = True   # YOLO bounding boxes + confidence labels
-DEBUG_AUDIO       = False   # lip contour + MAR label + MIC dot
+DEBUG_AUDIO       = True   # lip contour + MAR label + MIC dot
 DEBUG_MEDIAPIPE   = True   # iris/eye points, nose dot, H/V lines,
                             # yaw/pitch/gaze values, EAR + blink count
 
@@ -84,7 +84,8 @@ AUDIO_SAMPLE_RATE   = 16_000
 AUDIO_CHANNELS      = 1
 AUDIO_CHUNK_SAMPLES = 512
 AUDIO_SPEECH_THRESH = 0.5
-SPEAKER_HOLD_S      = 1.5
+SPEAKER_HOLD_S      = 0.3   # must be << TIMER_FLICKER_GRACE_S (1.5s) so brief audio
+                            # dropouts don't prevent the engine timer from accumulating
 
 # ── Object Detection (YOLO confidence thresholds) ────────────────────────────
 YOLO_DEFAULT_CONF = 0.50   # fallback for any class not listed below

@@ -42,7 +42,7 @@ This prevents false positives caused by lighting changes, momentary head movemen
 >
 > **After:** The rule is now absolute and defined in AlertEngine:
 > - `risk_added == 0` → **WARNING** (amber, on-screen only, never logged)
-> - `risk_added  > 0` → **ALERT** (red, logged to report, snapshot saved)
+> - `risk_added  > 0` → **ALERT** (red, logged to report, proof saved)
 >
 > **Why:** A warning must honestly mean "no score was added." If score is going up, the invigilator must see a red alert, not a soft warning. The old system was deceptive for gaze events where `WARN_FIRST_N=1` suppressed the alert but the score already moved.
 
@@ -50,11 +50,10 @@ This prevents false positives caused by lighting changes, momentary head movemen
 - Shown when no score was added.
 - Covers: grace period, active score cooldown, duration gate not yet met.
 - Displayed on-screen only. Not logged to report.
-- Message includes score preview: e.g. `"Earbuds visible  [+20 on 2nd detect]"`
 
 **Alert (red):**
 - Shown whenever score is actually added.
-- Logged to session report with timestamp, score added, and proof snapshot.
+- Logged to session report with timestamp, score added, and proof file path.
 - Message includes score added: e.g. `"Earbuds detected  [+20 pts]"`
 
 ---
@@ -172,6 +171,19 @@ no_person:
 > **After:** `_handle_special` tracks the actual score added and returns it in `risk_added`.
 > **Why:** Score was silently added while the invigilator saw a warning — violating the `risk_added>0 = alert` rule.
 
+#### Category E — Duration-tiered with continuous timer
+`speaker_audio`
+
+Speech detected without matching lip movement. Uses an independent continuous timer that resets only on sustained silence (flicker grace applied). Tier gates survive brief silence episodes to prevent gaming.
+
+```
+0s – 3s (WARN_DURATION)   →  WARNING every WARN_COOLDOWN (3s)
+at 3s                      →  ALERT + score (+10 fixed, one-time per episode)
+at 13s                     →  ALERT + score (+25 fixed, one-time per episode)
+every 10s after 13s        →  ALERT + score (+15 fixed, repeating)
+silence > flicker_grace_s  →  timer resets; tier gates PRESERVED
+```
+
 ---
 
 ### 2.6 Progressive Escalation
@@ -192,21 +204,40 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 
 ---
 
-## 3. Removed Features
+## 3. Audio Proctoring — Removed and Re-added
+
+### 3.1 What Was Removed (Old Audio System)
 
 > **▶ Change Log**
-> **Before:** The system included audio proctoring (microphone input, speaker verification via resemblyzer, silero-VAD, noisereduce) and video-based lip movement speaking detection.
+> **Before:** The system included a full speaker-verification pipeline:
+> - `core/audio_proctoring/` — ProctorSession, CheatType, CheatEvent (resemblyzer embeddings)
+> - Enrollment via `enrollment.wav` at startup
+> - Noise profiling + denoising via `noisereduce`
+> - Audio streamed via `sounddevice` InputStream
+> - Speaker diarization: classified audio as candidate voice vs external speaker
 >
-> **After:** Both features have been completely removed.
+> **After:** Entire old pipeline removed.
 >
-> **Why:** Audio proctoring introduced significant complexity (enrollment WAV, noise profiling, threading, ProctorSession) and produced unreliable results in noisy environments (SNR ~6.5 dB, weak speaker separation). Speaking detection via lip movement (MAR analysis) was also removed as it was warn-only and added no scoring value once audio was removed.
+> **Why:** Audio analysis produced unreliable results in typical noisy environments (measured SNR ~6.5 dB; resemblyzer needs 15+ dB). Speaker separation was weak (silhouette=0.321). The enrollment requirement added friction. The complexity (ProctorSession, threading, queue, denoising, embeddings) was disproportionate to reliability.
 
 **Removed components:**
 - `core/audio_proctoring/` — ProctorSession, CheatType, CheatEvent
-- Lip detection from `HeadPoseDetector` (MAR, velocity, oscillation)
-- `speaking` state key and all associated logic
-- `sounddevice`, `soundfile`, `noisereduce` dependencies
-- `looking_side + speaking` combo bonus
+- `sounddevice`, `soundfile`, `noisereduce`, `resemblyzer` dependencies
+- Enrollment WAV loading at startup
+- Noise profiling from first 0.5s of mic audio
+
+### 3.2 What Was Added (New Audio System)
+
+> **▶ Change Log**
+> **New approach:** Detect speech from an external device (phone speaker, laptop speaker) by checking for **audio-lip desync** — microphone picks up speech while the candidate's lips are not moving.
+>
+> **Why:** Simpler, more reliable, and no enrollment needed. A candidate speaking naturally will have lip movement; audio played from a device will not. The goal is not to identify who is speaking but whether the speech is coming from the candidate's mouth.
+
+**New components:**
+- `core/audio_monitor.py` — `AudioMonitor`: streams microphone via `pyaudio`, runs silero-VAD per chunk, exposes `speech_active()`. Stores a 30s timestamped ring buffer for proof audio extraction.
+- `core/audio_monitor.py` — `SpeakerAudioDetector`: combines `speech_active` + `lip_speaking` + `face_detected` to flag desync. Holds the flag for `SPEAKER_HOLD_S` after signal appears.
+- `detectors/lip_detector.py` — `LipDetector`: MAR (Mouth Aspect Ratio) + dynamic variance + oscillation analysis. Outputs `is_speaking`, `is_yawning`, `face_detected`.
+- `core/risk_engine.py` — `_handle_special("speaker_audio")`: duration-tiered scoring with tier gates that survive silence resets.
 
 ---
 
@@ -223,11 +254,12 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 | occ ≥ 3 | ALERT | +50 × confidence (non-decaying) |
 
 - Score cooldown: 15s (also arms on occ=1 grace)
-- Confidence threshold: 0.60
+- YOLO confidence threshold: 0.65 (`YOLO_PHONE_CONF`)
+- Vote threshold: 9/15 frames (`PHONE_MIN_VOTES`)
 
 **Combo bonus:** phone + looking_down simultaneously → +20 (decaying, 60s internal cooldown)
 
-> **▶ Change Log:** Score cooldown was 15s before and remains 15s. API cooldown reduced from 60s to 15s (now equals score_cooldown). Second occurrence score was +25 (unchanged). Phone vote threshold set to 9/15 frames to reduce brand-text false positives.
+> **▶ Change Log:** Score cooldown was 15s before and remains 15s. API cooldown reduced from 60s to 15s (now equals score_cooldown). Phone vote threshold set to 9/15 frames to reduce brand-text false positives.
 
 ---
 
@@ -242,11 +274,15 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 | Score cooldown active | WARNING | 0 |
 
 - Score cooldown: 30s
-- Confidence threshold: 0.65
+- YOLO confidence threshold: 0.70 (`YOLO_BOOK_CONF`)
+- Vote threshold: 10/15 frames (`BOOK_MIN_VOTES`)
 
 **Combo bonus:** looking_down + book simultaneously → +15 (decaying, 60s internal cooldown)
 
-> **▶ Change Log:** Score was +10, raised to +20. Score cooldown was 60s, reduced to 30s (allows 2 scoring events in a typical short session). API cooldown was 120s, now equals 30s.
+> **▶ Change Log — vote threshold and confidence**
+> **Before:** Vote threshold was 5/15 (same as default). YOLO confidence threshold was 0.65.
+> **After:** Vote threshold raised to 10/15. YOLO confidence threshold raised to 0.70. Both thresholds moved to `config.py` as `BOOK_MIN_VOTES` and `YOLO_BOOK_CONF`.
+> **Why:** Book detection had a high false-positive rate — common objects (notebooks, paper, desk surfaces) were misclassified. Raising both the vote count and the YOLO confidence gate significantly reduces spurious detections without missing real books.
 
 ---
 
@@ -260,7 +296,8 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 | occ ≥ 2 | ALERT | +20 × confidence (decaying) |
 
 - Score cooldown: 30s
-- Confidence threshold: 0.40
+- YOLO confidence threshold: 0.41 (`YOLO_AUDIO_CONF`)
+- Vote threshold: 5/15 frames (default)
 
 > **▶ Change Log:** Score was +10, raised to +20. Score cooldown was 120s, reduced to 30s. API cooldown was 180s, now 30s. Grace cooldown now armed on occ=1 (was not armed before).
 
@@ -276,11 +313,13 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 | occ ≥ 2 | ALERT | +20 × confidence (decaying) |
 
 - Score cooldown: 30s
-- Confidence threshold: 0.40
+- YOLO confidence threshold: 0.41 (`YOLO_AUDIO_CONF`)
+- Vote threshold: 9/15 frames (`EARBUD_MIN_VOTES`)
 
-> **▶ Change Log:** Score was +10, raised to +20. Score cooldown was 60s, reduced to 30s. API cooldown was 60s, now 30s. Grace cooldown armed on occ=1.
->
-> **Root cause of previous bug:** In a 77s session, earbud scored once at 26s. Next score allowed at 86s. Session ended at 77s. Only 1 scoring event possible despite 8 occurrences and 6 warnings. Reducing cooldown to 30s allows 2 scoring events in the same session.
+> **▶ Change Log — vote threshold**
+> **Before:** Vote threshold was 5/15 (same as default).
+> **After:** Vote threshold raised to 9/15 (`EARBUD_MIN_VOTES` in `config.py`).
+> **Why:** Earbud false-positive rate was high — hair accessories, ear shadows, and earrings were triggering detection. Higher vote count requires the object to be consistently visible across frames before scoring.
 
 ---
 
@@ -297,6 +336,7 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 
 - Score cooldown: 10s (also arms on occ=1 grace)
 - Flicker grace: 1.5s (brief dropout does not reset continuous timer)
+- **Proof:** image per alert occurrence; video (last 5s) on termination
 
 > **▶ Change Log:** occ=2 score was +10, raised to +20. Grace cooldown now armed on occ=1 to prevent immediate re-exploit. API cooldown was 30s, now 10s (equals score_cooldown).
 
@@ -315,6 +355,7 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 
 - Score cooldown: 10s per tier (internal per-tier cooldown: 15s)
 - Flicker grace: 1.5s
+- **Proof:** image per alert occurrence; video (last 5s) on termination
 
 > **▶ Change Log:** RiskEvent previously returned `risk_added=0.0` even when score was added internally in `_handle_special`. AlertEngine always showed a warning. Fixed to return actual score added so alert fires correctly.
 
@@ -400,7 +441,40 @@ All suspicious activities accumulate into a **risk score**. Termination via scor
 
 ---
 
-### 4.11 Exit Fullscreen
+### 4.11 Speaker Audio (Speech Without Lip Movement)
+
+**Category:** Duration-tiered with continuous timer (Category E)
+
+> **▶ Change Log — scoring approach**
+> **Before (v1):** Speaker audio had a flat `SPEAKER_AUDIO_SCORE` entry in `SCORE_COOLDOWNS` and was handled by `_score_event` like any other key. A fixed score was added every cooldown interval.
+>
+> **After (v2):** Moved to `_handle_special` with a dedicated continuous timer and three escalating tier gates. All speaker audio knobs (`SPEAKER_WARN_DURATION`, `SPEAKER_WARN_COOLDOWN`, `SPEAKER_SCORE_1`, `SPEAKER_SCORE_2_AT`, `SPEAKER_SCORE_2`, `SPEAKER_SCORE_TAIL`, `SPEAKER_TAIL_INTERVAL`, `SPEAKER_ALERT_COOLDOWN`) are consolidated in a single block in `settings/scoring.py`.
+>
+> **Why:** Flat scoring treated a 1-second glitch the same as a 30-second sustained episode. Duration-tiered scoring correctly escalates: warn briefly, then score progressively. Consolidating all knobs in one block avoids them being split between `scoring.py` and `alerts.py`.
+
+| Timeline | Action | Score |
+|---|---|---|
+| 0 – 3s | WARNING every 3s | 0 |
+| at 3s | ALERT (tier 1, one-time per episode) | +10 fixed |
+| at 13s | ALERT (tier 2, one-time per episode) | +25 fixed |
+| every 10s after 13s | ALERT (tail, repeating) | +15 fixed |
+
+**Silence reset behaviour:**
+
+> **▶ Change Log — anti-gaming fix**
+> **Before:** Silence reset cleared `_speaker_since` AND all three tier gate cooldowns (`_speaker_t1`, `_speaker_t2`, `_speaker_tail`). Stopping and restarting audio reset the full 3s grace on every re-entry.
+>
+> **After:** Silence (sustained beyond `flicker_grace_s`) only resets `_speaker_since` and `_speaker_gone_since`. Tier gates are **not cleared**.
+>
+> **Why:** Without this, a candidate could exploit the system by alternating 2-second bursts of speaker audio separated by brief pauses — each re-entry got the full 3s grace and tier-1 was never reached. Now re-entries after silence skip previously reached tiers and score sooner.
+
+- Flicker grace: `TIMER_FLICKER_GRACE_S` (1.5s) — brief silence does not reset timer
+- Score bucket: non-decaying (fixed)
+- **Proof:** `.mp4` video + companion `.wav` audio file (or merged `.mkv` if ffmpeg available)
+
+---
+
+### 4.12 Exit Fullscreen
 
 **Category:** Time-based (implemented but low priority)
 
@@ -419,19 +493,27 @@ Events only contribute risk if detection confidence meets the per-key threshold.
 Risk += BaseScore × confidence
 ```
 
-Per-key minimum confidence (matches YOLO detection thresholds):
+Per-key YOLO confidence thresholds — all in `config.py`:
 
-| Key | Min confidence |
-|---|---|
-| phone | 0.60 |
-| book | 0.65 |
-| headphone | 0.40 |
-| earbud | 0.40 |
-| all others | 0.50 (global fallback) |
+| Key | Config constant | Value |
+|---|---|---|
+| default | `YOLO_DEFAULT_CONF` | 0.50 |
+| person | `YOLO_PERSON_CONF` | 0.30 |
+| phone | `YOLO_PHONE_CONF` | 0.65 |
+| book | `YOLO_BOOK_CONF` | 0.70 |
+| headphone + earbud | `YOLO_AUDIO_CONF` | 0.41 |
 
 Head/gaze events always pass `confidence=1.0`.
 
-> **▶ Change Log:** Per-key min confidence thresholds added to match YOLO detector thresholds. Previously a single global `MIN_CONF=0.5` was used for all events, meaning low-confidence YOLO detections could score with reduced weight even below the detector's own confidence threshold.
+> **▶ Change Log — centralised to config.py**
+> **Before:** Confidence thresholds were hardcoded as default parameter values in `ObjectDetector.__init__()` in `detectors/object_detector.py`. To change a threshold you had to edit the detector source.
+>
+> **After:** All thresholds live in `config.py` under `# Object Detection (YOLO confidence thresholds)` and are passed explicitly when constructing `ObjectDetector()` in `main.py`.
+>
+> **Why:** Confidence thresholds are tuning parameters, not implementation details. They belong alongside vote counts and score values so all detection sensitivity can be adjusted in one place.
+
+> **▶ Change Log — per-key thresholds in scoring.py (SCORE_MIN_CONF)**
+> `settings/scoring.py` retains a `SCORE_MIN_CONF` dict used by RiskEngine as a scoring gate (distinct from the YOLO detection gate). Previously a single global `MIN_CONF=0.5` was used for all events, meaning low-confidence YOLO detections could score with reduced weight even below the detector's own confidence threshold.
 
 ---
 
@@ -456,6 +538,7 @@ warn_cooldown <= score_cooldown
 | book | 30s | 30s | 15s |
 | headphone | 30s | 30s | 15s |
 | earbud | 30s | 30s | 15s |
+| speaker_audio | internal tier system (see §4.11) | `SPEAKER_ALERT_COOLDOWN` (10s) | `SPEAKER_WARN_COOLDOWN` (3s) |
 
 > **▶ Change Log:** Previously api_cooldowns were much longer than score_cooldowns (e.g., looking_away: score=3s, api=45s), causing score to accumulate silently for long periods with no on-screen alert. Now every scoring event directly fires an alert.
 
@@ -466,7 +549,7 @@ warn_cooldown <= score_cooldown
 Two score buckets exist:
 
 **Non-decaying (fixed) bucket** — permanently accumulated, never reduced:
-- phone, fake_presence, multiple_people, no_person, tab_switch
+- phone, fake_presence, multiple_people, no_person, speaker_audio, tab_switch
 
 **Decaying bucket** — reduced periodically:
 - gaze events, book, headphone, earbud, face_hidden, partial_face
@@ -479,7 +562,7 @@ every decay_interval: decaying_score -= 5  (minimum 0)
 
 Maximum value per bucket: 150 points.
 
-> **▶ Change Log:** `long speaking` removed from non-decaying list (speaking detection removed entirely). Bucket cap of 150 made explicit in `settings/scoring.py` as `DECAY_BUCKET_CAP`.
+> **▶ Change Log:** `long speaking` removed from non-decaying list (old speaking detection removed). `speaker_audio` added to non-decaying list. Bucket cap of 150 made explicit in `settings/scoring.py` as `DECAY_BUCKET_CAP`.
 
 ---
 
@@ -492,7 +575,7 @@ Extra score when two suspicious conditions occur simultaneously. Each combo has 
 | looking_down + book | +15 | decaying |
 | phone + looking_down | +20 | decaying |
 
-> **▶ Change Log:** `looking_side + speaking` combo removed (speaking detection removed). Combo values moved to `settings/scoring.py` as `COMBO_DOWN_BOOK` and `COMBO_PHONE_DOWN`.
+> **▶ Change Log:** `looking_side + speaking` combo removed (old speaking detection removed). Combo values moved to `settings/scoring.py` as `COMBO_DOWN_BOOK` and `COMBO_PHONE_DOWN`.
 
 ---
 
@@ -518,12 +601,16 @@ Termination via score requires Admin Review state. Automatic termination rules b
 
 > **▶ New Section**
 
-All tunable values are centralized in `settings/`:
+All tunable values are centralized in `settings/` and `config.py`:
 
 ```
+config.py          — detection toggles, debug gates, YOLO confidence thresholds,
+                     vote counts, audio params, proof params, file paths
 settings/
-  scoring.py   — score values, score cooldowns, state thresholds, decay, combos
-  alerts.py    — api cooldowns, warn cooldowns, display durations, score preview text
+  scoring.py       — score values, score cooldowns, state thresholds, decay,
+                     combos, speaker audio tier knobs
+  alerts.py        — api cooldowns, warn cooldowns, display durations,
+                     WARN_MESSAGES + ALERT_MESSAGES dicts
 ```
 
 **Engine files contain zero hardcoded numbers.** Both import from settings:
@@ -534,44 +621,124 @@ settings/
 
 ---
 
-## 11. Session Report
+## 11. Proof Capture System
 
-After session end a JSON report is saved to `reports/`.
+> **▶ New Section**
 
-**Report contents:**
+### 11.1 Overview
 
+When `SAVE_PROOF = True` in `config.py`, each scoring alert saves a proof file alongside the report. Proof is categorised by event type into three formats.
+
+> **▶ Change Log — from snapshots to typed proof**
+> **Before:** `AlertEngine._save_snapshot()` saved a single JPEG frame for every alert regardless of event type. The path was stored as `"snapshot"` in the alert log entry. AlertEngine mixed file I/O with alert routing logic.
+>
+> **After:** `ProofWriter` (`utils/proof_writer.py`) handles all proof capture. AlertEngine has zero file I/O. Three proof types are used based on event semantics. Audio is included for speaker events.
+>
+> **Why:** A single frame is insufficient evidence for time-based events (e.g., `looking_away` — a single frame could be innocent). For speaker audio, having audio alongside video is essential evidence. Separating proof logic from AlertEngine keeps the routing layer clean and testable.
+
+### 11.2 Proof Types
+
+| Type | Format | Events | Details |
+|---|---|---|---|
+| **image** | `.jpg` | phone, book, headphone, earbud | Single frame at alert time, written synchronously |
+| **video** | `.mp4` | looking_away/down/up/side, face_hidden, partial_face, fake_presence | 5s clip centred on alert (2.5s pre + 2.5s post), written async |
+| **av** | `.mkv` + `.wav` | speaker_audio | Same 5s window; video + companion audio WAV; merged to single `.mkv` if ffmpeg available |
+| **image + video** | `.jpg` per alert + `.mp4` on termination | multiple_people, no_person | Image saved per scoring occurrence; 5s video saved when exam is terminated |
+
+### 11.3 Rolling Frame Buffer
+
+`ProofWriter` maintains a rolling deque of `(timestamp, frame)` pairs (`maxlen=150`, ~5s at 30fps). `push_frame()` is called every main loop iteration.
+
+At alert time, pre-event frames are snapshotted immediately and passed to an async thread. The thread sleeps for `PROOF_POST_S` seconds, then reads post-event frames from the still-rolling buffer, combines them, and writes the file.
+
+### 11.4 Audio Ring Buffer
+
+`AudioMonitor` maintains a timestamped deque of `(wall_time, chunk_bytes)` pairs (~30s of audio). `get_audio_range(t0, t1)` returns all PCM bytes captured in the given wall-clock window.
+
+For AV proof: the async write thread calls `get_audio_range(event_time - pre_s, event_time + post_s)` after sleeping, then writes the WAV and merges (or saves as companion file).
+
+### 11.5 ffmpeg Availability
+
+| ffmpeg present | Output |
+|---|---|
+| Yes | Single `.mkv` (video + AAC audio merged) |
+| No | `.mp4` (video) + `.wav` (audio) as separate companion files |
+
+### 11.6 Termination Deduplication
+
+> **▶ Change Log — duplicate termination alert/proof bug**
+> **Before:** Once `RiskEngine.terminated` is set to `True`, every subsequent `process_event()` call in the same frame returns `RiskEvent(terminated=True)` regardless of the key. Both `no_person` and `speaker_audio` (processed in the same frame) generated a termination alert and saved proof. Report contained two "EXAM TERMINATED" entries, one of which had a spurious `speaker_audio_*.mp4` proof path.
+>
+> **After:** `AlertEngine._termination_alerted` flag (bool) ensures the termination alert is emitted only once. `_termination_proved` flag in `main.py` ensures proof is captured only once, for the key that triggered termination.
+>
+> **Why:** Multiple termination log entries confuse report readers and waste disk space on spurious proof files.
+
+---
+
+## 12. Session Report
+
+> **▶ Change Log — session folder structure**
+> **Before:** Report saved as `reports/report_YYYYMMDD_HHMMSS.json`. Proof snapshots in `reports/snapshots/`. Audio report in `reports/audio/<session_id>/`.
+>
+> **After:** Each session gets its own folder: `reports/<YYYYMMDD_HHMMSS>/`. Report is `report.json` inside that folder. Proof files are in `reports/<YYYYMMDD_HHMMSS>/proof/`. No separate audio report.
+>
+> **Why:** A flat `reports/` folder grows unwieldy over multiple sessions. A per-session folder keeps all evidence for one exam together: report + images + videos + audio — easy to archive, share, or delete per candidate.
+
+**Session folder layout:**
+```
+reports/
+  20260312_133718/
+    report.json
+    proof/
+      earbud_133749_59.jpg
+      looking_away_133728_08.mp4
+      speaker_audio_134012_33.mp4
+      speaker_audio_134012_33.wav     ← companion audio (no ffmpeg)
+      no_person_133828_58.jpg
+      no_person_133838_66.mp4         ← termination video
+```
+
+**Report schema:**
 ```json
 {
-  "session_start": "...",
-  "session_end":   "...",
-  "duration_s":    77.3,
-  "total_api_alerts": 2,
-  "total_warnings":   10,
-  "alert_summary":  { "Earbuds detected [+20 pts]": 1 },
-  "warning_summary": { "Earbuds visible [+20 on 2nd detect]": 6 },
+  "session_start": "2026-03-12 13:37:18",
+  "session_end":   "2026-03-12 13:38:42",
+  "duration_s":    83.8,
+  "total_api_alerts": 9,
+  "total_warnings":   13,
+  "alert_summary":  { "Candidate not facing screen  [+5 pts]": 3 },
+  "warning_summary": { "Not facing screen": 3 },
   "alert_log": [
-    { "time": "00:26", "elapsed_s": 26.7, "message": "...", "score_added": 20.0, "snapshot": "..." }
+    {
+      "time": "00:09",
+      "elapsed_s": 9.6,
+      "message": "Candidate not facing screen  [+5 pts]",
+      "score_added": 5.0,
+      "proof": "reports/20260312_133718/proof/looking_away_133728_08.mp4"
+    }
   ],
   "warning_log": [
-    { "time": "00:09", "elapsed_s": 9.3, "message": "..." }
+    { "time": "00:09", "elapsed_s": 9.7, "message": "Not facing screen" }
   ],
   "risk": {
-    "final_score": 29.2,
-    "fixed_score": 20.0,
-    "decaying_score": 9.2,
-    "final_state": "NORMAL",
-    "occurrences": { "earbud": 8 },
-    "terminated": false,
+    "final_score": 175.0,
+    "fixed_score": 125.0,
+    "decaying_score": 50.0,
+    "final_state": "TERMINATED",
+    "occurrences": { "earbud": 6, "looking_away": 3 },
+    "terminated": true,
+    "termination_reason": "No person detected >20s",
+    "decay_ticks": 0,
     "decay_log": []
   }
 }
 ```
 
-> **▶ Change Log:** `warning_log` added alongside `alert_log` — previously warnings were on-screen only and not recorded. `audio` section removed (audio proctoring removed). Alert and warning messages now include score information inline (`[+20 pts]`, `[+20 on 2nd detect]`). Snapshots saved per alert as proof.
+> **▶ Change Log:** `warning_log` added alongside `alert_log` — previously warnings were on-screen only and not recorded. `audio` section removed (old audio proctoring removed). Score preview removed from warnings. `snapshot` field renamed to `proof`. Proof path points into the session folder.
 
 ---
 
-## 12. Automatic Termination Rules
+## 13. Automatic Termination Rules
 
 Two automatic termination rules exist:
 
@@ -584,28 +751,42 @@ All other termination passes through the score state machine (ADMIN_REVIEW → T
 
 ---
 
-## 13. Temporal Processing Layer
+## 14. Temporal Processing Layer
 
 Before risk evaluation, all events pass through temporal filtering:
 
-- **ObjectTemporalTracker:** sliding window vote (default 15 frames, min 5 votes). Phone requires 9/15 votes (stricter, reduces brand-text false positives).
+- **ObjectTemporalTracker:** sliding window vote (default 15 frames, min 5 votes).
+
+  | Object | Vote threshold | Config constant | Reason |
+  |---|---|---|---|
+  | default | 5/15 | `OBJECT_MIN_VOTES` | — |
+  | phone | 9/15 | `PHONE_MIN_VOTES` | brand text / logos cause false positives |
+  | book | 10/15 | `BOOK_MIN_VOTES` | paper, notebook surfaces cause false positives |
+  | earbud | 9/15 | `EARBUD_MIN_VOTES` | earrings, hair accessories cause false positives |
+
+  > **▶ Change Log:** `BOOK_MIN_VOTES` and `EARBUD_MIN_VOTES` added to `config.py` (previously used default 5/15). Both raised to reduce false-positive detections that were triggering warnings during normal exam conditions.
+
 - **HeadTracker:** duration gate — condition must persist N seconds before triggering (1.5s for head/gaze, 1.0s for looking_side).
 - **Flicker frame guard:** frames with mean < 5 or std < 8 skipped (corrupt/black frames).
 - **Flicker grace:** multiple_people and no_person continuous timers tolerate 1.5s dropout.
 
 ---
 
-## 14. Software Architecture
+## 15. Software Architecture
 
 ```
 main.py
-  ├── ObjectDetector       (YOLO — phone, book, headphone, earbud, person)
-  ├── HeadPoseDetector     (MediaPipe — yaw, pitch, gaze, blink, partial_face)
-  ├── ObjectTemporalTracker
-  ├── HeadTracker          (duration gate)
-  ├── LivenessDetector     (fake presence)
-  ├── RiskEngine           (scoring, state, decay, combos)
-  └── AlertEngine          (warn vs alert routing, snapshots)
+  ├── ObjectDetector         (YOLO — phone, book, headphone, earbud, person)
+  ├── HeadPoseDetector       (MediaPipe — yaw, pitch, gaze, blink, partial_face)
+  ├── LipDetector            (MAR + variance + oscillation → is_speaking, is_yawning)
+  ├── AudioMonitor           (pyaudio + silero-VAD → speech_active; 30s ring buffer)
+  ├── SpeakerAudioDetector   (speech_active + lip_speaking → desync flag)
+  ├── ObjectTemporalTracker  (per-key vote window)
+  ├── HeadTracker            (duration gate)
+  ├── LivenessDetector       (fake presence)
+  ├── RiskEngine             (scoring, state, decay, combos)
+  ├── AlertEngine            (warn vs alert routing)
+  └── ProofWriter            (image / video / AV proof capture)
 
 settings/
   ├── scoring.py
@@ -622,18 +803,28 @@ settings/
 - Gaze aggregation bonus
 - State machine update
 - Termination rules
+- Speaker audio tier logic (`_handle_special`)
 
 **AlertEngine responsibilities:**
-- `risk_added == 0` → warn (with score preview)
-- `risk_added  > 0` → alert (with score added, snapshot)
+- `risk_added == 0` → warn
+- `risk_added  > 0` → alert (with score added)
 - API cooldown gating (= score cooldown)
+- Termination alert deduplication (`_termination_alerted` flag)
+
+**ProofWriter responsibilities:**
+- Rolling frame buffer (`push_frame`)
+- Proof type dispatch (image / video / AV) based on event key
+- Async video/AV writing (pre+post frames, audio ring slice)
+- ffmpeg merge or companion WAV fallback
+- `flush()` on shutdown to complete pending writes
 
 ---
 
-## 15. Future Improvements
+## 16. Future Improvements
 
 - Sliding window risk analysis
 - Adaptive scoring models based on exam duration
 - Admin dashboard with live video and alert stream
-- Re-introduction of audio proctoring with better hardware/SNR
+- `ffmpeg` installation for single-file AV proof (`.mkv`)
 - Behavioral pattern detection (repeated sequences of gaze events)
+- Multi-face landmark tracking (distinguish candidate from other people in frame)

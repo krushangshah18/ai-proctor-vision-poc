@@ -305,6 +305,9 @@ def main():
         )
         if path and alert_log:
             alert_log[-1]["proof"] = path
+            # When ffmpeg is absent, AV proof is video + companion .wav
+            if needs_audio and not proof_writer.has_ffmpeg:
+                alert_log[-1]["proof_audio"] = path.rsplit(".", 1)[0] + ".wav"
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     while True:
