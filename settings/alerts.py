@@ -21,6 +21,7 @@ WARN_COOLDOWNS: dict = {
     "looking_down"   :  3,
     "looking_up"     :  3,
     "looking_side"   :  3,
+    "speaker_audio"  :  3,    # ← edit in scoring.py (SPEAKER_WARN_COOLDOWN)
     "partial_face"   :  3,
     "face_hidden"    :  3,
     "fake_presence"  :  5,    # score_cooldown = 10s
@@ -40,6 +41,7 @@ API_COOLDOWNS: dict = {
     "looking_down"   :  5,
     "looking_up"     :  5,
     "looking_side"   :  5,
+    "speaker_audio"  : 10,    # ← edit in scoring.py (SPEAKER_ALERT_COOLDOWN)
     "partial_face"   :  5,
     "face_hidden"    :  5,
     "fake_presence"  : 10,
@@ -51,21 +53,39 @@ API_COOLDOWNS: dict = {
     "earbud"         : 30,
 }
 
-# ── Score preview text (shown inside every warning banner) ─────────────────────
-# Describes what score the event will add once it escalates to a scored alert.
-# Keep these strings in sync with the score values in scoring.py.
-SCORE_PREVIEW: dict = {
-    "phone"          : "+25 on 2nd detect",
-    "book"           : "+20 per 30s",
-    "headphone"      : "+20 on 2nd detect",
-    "earbud"         : "+20 on 2nd detect",
-    "looking_away"   : "+5 per 5s",
-    "looking_down"   : "+5 per 5s",
-    "looking_up"     : "+5 per 5s",
-    "looking_side"   : "+5 per 5s",
-    "face_hidden"    : "+10 at 5s  /  +20 at 10s",
-    "partial_face"   : "+2 per 5s",
-    "fake_presence"  : "+30 at 10s  /  +60 at 25s",
-    "multiple_people": "+20 on 2nd  /  +50 on 3rd",
-    "no_person"      : "+25 at 5s  /  +50 at 10s",
+# ── On-screen messages ─────────────────────────────────────────────────────────
+# WARN_MESSAGES — shown on amber banner (no score added yet)
+# ALERT_MESSAGES — shown on red banner (score was added, pts appended automatically)
+WARN_MESSAGES: dict = {
+    "phone"          : "Phone visible in frame",
+    "book"           : "Book visible in frame",
+    "headphone"      : "Headphones visible",
+    "earbud"         : "Earbuds visible",
+    "looking_away"   : "Not facing screen",
+    "looking_down"   : "Looking down",
+    "looking_up"     : "Looking up",
+    "looking_side"   : "Gaze shifted sideways",
+    "face_hidden"    : "Face not clearly visible",
+    "partial_face"   : "Face partially outside frame",
+    "fake_presence"  : "No movement detected — please move slightly",
+    "multiple_people": "Multiple people in frame",
+    "no_person"      : "Candidate not visible",
+    "speaker_audio"  : "Speech detected without lip movement",
+}
+
+ALERT_MESSAGES: dict = {
+    "phone"          : "Mobile phone detected",
+    "book"           : "Book detected",
+    "headphone"      : "Headphones detected",
+    "earbud"         : "Earbuds detected",
+    "looking_away"   : "Candidate not facing screen",
+    "looking_down"   : "Candidate looking down",
+    "looking_up"     : "Candidate looking up",
+    "looking_side"   : "Candidate gaze away from screen",
+    "face_hidden"    : "Face obstructed or hidden",
+    "partial_face"   : "Candidate too far from camera",
+    "fake_presence"  : "Possible fake presence (static image)",
+    "multiple_people": "Multiple people detected",
+    "no_person"      : "No person detected — candidate absent",
+    "speaker_audio"  : "Speaker audio detected",
 }

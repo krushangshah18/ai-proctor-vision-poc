@@ -74,11 +74,14 @@ class HeadPoseDetector:
         C = self._dist(eye[0], eye[3])
         return (A + B) / (2.0 * C + 1e-6)
 
-    def detect(self, frame, draw=True):
+    def detect(self, frame, draw=True,
+               show_gaze=True, show_pose=True, show_liveness=True):
         """
-        Returns:
-            - looking_away (bool)
-            - yaw_ratio (float)
+        draw        — master draw gate (DEBUG flag)
+        show_gaze   — iris dots + eye corner points  (DEBUG_MEDIAPIPE)
+        show_pose   — nose dot + H/V lines + yaw/pitch/gaze text  (DEBUG_MEDIAPIPE,
+                       only if DETECT_LOOKING_AWAY / DETECT_LOOKING_SIDE enabled)
+        show_liveness — EAR + blink count text  (DEBUG_MEDIAPIPE + DETECT_FAKE_PRESENCE)
         """
         h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) #OpenCV uses BGR -> MediaPipe needs RGB
@@ -177,67 +180,59 @@ class HeadPoseDetector:
             self.blink_counter = 0
 
         if draw and self.DEBUG:
-            #Nose
-            cv2.circle(frame, nose, 4, (0,255,255), -1)
+            _font  = cv2.FONT_HERSHEY_SIMPLEX
+            _small = 0.42
+            _thick = 1
 
-            # Left iris
-            cv2.circle(frame, le_iris, 3, (255, 0, 255), -1)
-            # Right iris
-            cv2.circle(frame, re_iris, 3, (255, 0, 255), -1)
+            def _tag(text, x, y, color):
+                """Small pill-style debug tag."""
+                (tw, th), _ = cv2.getTextSize(text, _font, _small, _thick)
+                cv2.rectangle(frame, (x - 3, y - th - 2), (x + tw + 3, y + 3),
+                              (20, 20, 20), -1)
+                cv2.putText(frame, text, (x, y), _font, _small, color, _thick, cv2.LINE_AA)
 
-            # Draw eyes
-            for p in left_eye + right_eye:
-                cv2.circle(frame, p, 2, (255, 0, 255), -1)
+            # ── Gaze: iris dots + eye corner points ───────────────────────────
+            if show_gaze:
+                for p in left_eye + right_eye:
+                    cv2.circle(frame, p, 2, (180, 0, 180), -1)
+                cv2.circle(frame, le_iris, 3, (255, 80, 255), -1)
+                cv2.circle(frame, re_iris, 3, (255, 80, 255), -1)
 
-            #Face Center line
-            cv2.line(
-                frame,
-                (left_cheek[0], face_center_y),
-                (right_cheek[0], face_center_y),
-                (0,255,0),
-                2 
-            )
+            # ── Pose: nose + H/V lines + value tags ───────────────────────────
+            if show_pose:
+                # Nose dot
+                cv2.circle(frame, nose, 4, (0, 220, 220), -1)
+                # Horizontal line (yaw reference)
+                cv2.line(frame,
+                         (left_cheek[0], face_center_y),
+                         (right_cheek[0], face_center_y),
+                         (0, 200, 80), 1)
+                # Vertical line (pitch reference)
+                cv2.line(frame,
+                         (face_center_x, forehead[1]),
+                         (face_center_x, chin[1]),
+                         (200, 200, 0), 1)
 
-            #pitch
-            cv2.line(
-                frame,
-                (face_center_x, forehead[1]),
-                (face_center_x, chin[1]),
-                (255, 255, 0),
-                2
-            )
+                h_frame = frame.shape[0]
+                tag_x = frame.shape[1] - 130  # right-side column, below risk overlay
+                tag_y_start = 120
+                step = 18
 
-            # #Yaw Text
-            # cv2.putText(frame, f"Yaw: {yaw_ratio:.2f}",
-            #                         (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-            #                         (0,255,0) if not looking_away else (0,0,255), 2)
+                yaw_col   = (80, 80, 255) if looking_away else (100, 220, 100)
+                pitch_col = (80, 80, 255) if (looking_down or looking_up) else (100, 220, 100)
+                gaze_col  = (80, 80, 255) if (looking_left or looking_right) else (100, 220, 100)
 
-            # #pitch text
-            # cv2.putText(frame, f"Pitch: {pitch_ratio:.2f}",
-            #             (20,110), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-            #             (0,255,0), 2)
+                _tag(f"Yaw  {yaw_ratio:+.2f}",   tag_x, tag_y_start,          yaw_col)
+                _tag(f"Ptch {pitch_ratio:+.2f}",  tag_x, tag_y_start + step,   pitch_col)
+                _tag(f"Gaze {gaze_ratio:+.2f}",   tag_x, tag_y_start + step*2, gaze_col)
 
-            # #Gaze text
-            # cv2.putText(frame, f"Gaze: {gaze_ratio:.2f}",
-            #             (20,140), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-            #             (0,255,0), 2)
-
-            # EAR + Blink info
-            cv2.putText(frame, f"EAR: {ear:.2f} | Blinks: {self.total_blinks}",
-                        (20,170), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (255,0,255), 2)
-
-            # cv2.putText(frame, f"MAR:{mar:.2f}",
-            #             (20,200), cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
-
-            # cv2.putText(frame, f"Var:{variance:.4f}",
-            #             (20,220), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
-
-            # cv2.putText(frame, f"Vel:{vel_mean:.3f}",
-            #             (20,240), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
-
-            # cv2.putText(frame, f"Osc:{zero_crossings}",
-            #             (20,260), cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+            # ── Liveness: EAR + blink count ───────────────────────────────────
+            if show_liveness:
+                tag_x = frame.shape[1] - 130
+                tag_y  = 120 + 18 * 3 if show_pose else 120
+                ear_col = (80, 80, 255) if ear < self.EAR_THRESHOLD else (100, 220, 100)
+                _tag(f"EAR  {ear:.2f}", tag_x, tag_y,      ear_col)
+                _tag(f"Blnk {self.total_blinks}", tag_x, tag_y + 18, (160, 160, 255))
 
         return (
             looking_away,

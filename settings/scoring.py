@@ -43,6 +43,7 @@ SCORE_COOLDOWNS: dict = {
     "multiple_people": 10,
     "no_person"      : 10,
     "fake_presence"  : 10,
+    # speaker_audio not listed — managed by its own tier system below
 }
 
 # ── State machine thresholds ───────────────────────────────────────────────────
@@ -87,6 +88,25 @@ MULTI_PEOPLE_SCORE_3RD : float = 50.0   # (grace+2)th+ occurrence
 # ── Gaze events: looking_away / down / up / side (decaying) ───────────────────
 # Score is added once per SCORE_COOLDOWNS["looking_*"] seconds while active.
 GAZE_SCORE      : float =  5.0
+
+# ── Speaker audio — speech without lip movement ────────────────────────────────
+# All speaker audio knobs live here (scoring + alert cooldowns in one place).
+#
+# Timeline (timer resets to 0 if audio goes silent for > flicker_grace_s):
+#   0 – WARN_DURATION   → warn only, repeated every WARN_COOLDOWN seconds
+#   at WARN_DURATION    → alert  +SCORE_1 fixed  (one-time per episode)
+#   at SCORE_2_AT       → alert  +SCORE_2 fixed  (one-time per episode)
+#   every TAIL_INTERVAL → alert  +SCORE_TAIL fixed  (repeating until silence)
+
+SPEAKER_WARN_DURATION : float =  3.0   # seconds of grace before first score
+SPEAKER_WARN_COOLDOWN : float =  3.0   # warn repeats this often during grace window
+
+SPEAKER_SCORE_1       : float = 10.0   # score added at WARN_DURATION
+SPEAKER_SCORE_2_AT    : float = 13.0   # seconds until second score
+SPEAKER_SCORE_2       : float = 25.0   # score added at SCORE_2_AT
+SPEAKER_SCORE_TAIL    : float = 15.0   # score added every TAIL_INTERVAL after SCORE_2_AT
+SPEAKER_TAIL_INTERVAL : float = 10.0   # tail repeat cadence (seconds)
+SPEAKER_ALERT_COOLDOWN: float = 10.0   # min gap between alert banners (= TAIL_INTERVAL)
 
 # ── Partial face — too far from camera (decaying) ─────────────────────────────
 PARTIAL_FACE_SCORE         : float = 2.0   # score per scoring cooldown tick

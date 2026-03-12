@@ -103,6 +103,10 @@ class RiskEngine:
         self._multi_people_gone_since:  Optional[float] = None
         self._no_person_gone_since:     Optional[float] = None
 
+        # Speaker audio continuous-presence timer (with flicker grace + full reset)
+        self._speaker_since:      Optional[float] = None
+        self._speaker_gone_since: Optional[float] = None
+
         # Currently-active event set (for combo detection)
         self._active_set: set[str] = set()
 
@@ -193,6 +197,14 @@ class RiskEngine:
                 elif now - self._no_person_gone_since >= self._flicker_grace_s:
                     self._no_person_since     = None
                     self._no_person_gone_since = None
+            elif key == "speaker_audio" and self._speaker_since is not None:
+                if self._speaker_gone_since is None:
+                    self._speaker_gone_since = now
+                elif now - self._speaker_gone_since >= self._flicker_grace_s:
+                    # Reset episode timer only — tier gates survive so re-entries
+                    # skip grace and score sooner (prevents gaming by breaking audio)
+                    self._speaker_since      = None
+                    self._speaker_gone_since = None
             self._update_state()
             return RiskEvent(key=key, active=False, occurrence_count=occ)
 
@@ -410,6 +422,34 @@ class RiskEngine:
             return RiskEvent(key=key, active=True, is_new_occurrence=(occ == 1 and duration < 1),
                              occurrence_count=occ, duration=duration,
                              risk_added=no_person_added)  # carries actual score added
+
+        elif key == "speaker_audio":
+            self._speaker_gone_since = None   # active — cancel flicker grace timer
+            if self._speaker_since is None:
+                self._speaker_since = now
+            dur = now - self._speaker_since
+
+            speaker_added = 0.0
+
+            if dur >= S.SPEAKER_SCORE_2_AT:
+                if not self._in_cooldown("_speaker_t2", now):
+                    # One-time tier-2 score
+                    speaker_added = self._add(S.SPEAKER_SCORE_2, decaying=False)
+                    self._arm_cooldown("_speaker_t2", now, override_cd=999999)
+                    # Arm tail so it fires TAIL_INTERVAL after this
+                    self._arm_cooldown("_speaker_tail", now, override_cd=S.SPEAKER_TAIL_INTERVAL)
+                elif not self._in_cooldown("_speaker_tail", now):
+                    # Repeating tail
+                    speaker_added = self._add(S.SPEAKER_SCORE_TAIL, decaying=False)
+                    self._arm_cooldown("_speaker_tail", now, override_cd=S.SPEAKER_TAIL_INTERVAL)
+            elif dur >= S.SPEAKER_WARN_DURATION and not self._in_cooldown("_speaker_t1", now):
+                # One-time tier-1 score
+                speaker_added = self._add(S.SPEAKER_SCORE_1, decaying=False)
+                self._arm_cooldown("_speaker_t1", now, override_cd=999999)
+
+            return RiskEvent(key=key, active=True, is_new_occurrence=(occ == 1 and dur < 1),
+                             occurrence_count=occ, duration=dur,
+                             risk_added=speaker_added)
 
         return None  # proceed to normal _score_event
 

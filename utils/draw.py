@@ -1,6 +1,19 @@
 import cv2
 
 
+def draw_audio_status(frame, active: bool) -> None:
+    """MIC indicator — bottom-right corner to avoid overlap with score panel."""
+    h, w = frame.shape[:2]
+    cx, cy = w - 28, h - 28
+    color  = (60, 60, 220) if active else (55, 55, 55)
+    border = (120, 120, 255) if active else (100, 100, 100)
+    cv2.circle(frame, (cx, cy), 12, color,  -1)
+    cv2.circle(frame, (cx, cy), 12, border,  1)
+    label_color = (200, 200, 255) if active else (110, 110, 110)
+    cv2.putText(frame, "MIC", (w - 52, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, label_color, 1, cv2.LINE_AA)
+
+
 def draw_alerts(frame, warnings: list[str], alerts: list[str]) -> None:
     """
     warnings — amber pill badge + amber text on translucent dark background
@@ -67,19 +80,34 @@ def draw_alerts(frame, warnings: list[str], alerts: list[str]) -> None:
 
 
 def draw_detections(frame, detections):
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.40
+    thick = 1
+    # colour per class (BGR)
+    _COLORS = {
+        "person"    : (80,  200,  80),
+        "cell_phone": (60,  60,  255),
+        "book"      : (255, 160,  40),
+        "headphone" : (255, 100, 200),
+        "earbud"    : (200,  80, 255),
+    }
+    _DEFAULT = (140, 200, 140)
+
     for det in detections:
         x1, y1, x2, y2 = det["bbox"]
-        label = f"{det['class']} : {det['confidence']:.2f}"
+        cls   = det["class"]
+        conf  = det.get("confidence", 1.0)
+        color = _COLORS.get(cls, _DEFAULT)
+        label = f"{cls}  {conf:.2f}"
 
-        cv2.rectangle(frame,
-                      pt1=(x1, y1),
-                      pt2=(x2, y2),
-                      color=(0, 255, 0),
-                      thickness=2)
-        cv2.putText(frame,
-                    label,
-                    org=(x1, y1 - 10),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.6,
-                    color=(0, 255, 0),
-                    thickness=1)
+        # Box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+
+        # Label pill above box
+        (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+        lx1, ly1 = x1, max(0, y1 - th - 6)
+        lx2, ly2 = x1 + tw + 8, y1
+        cv2.rectangle(frame, (lx1, ly1), (lx2, ly2), color, -1)
+        txt_color = (10, 10, 10) if sum(color) > 400 else (240, 240, 240)
+        cv2.putText(frame, label, (lx1 + 4, ly2 - 3),
+                    font, scale, txt_color, thick, cv2.LINE_AA)

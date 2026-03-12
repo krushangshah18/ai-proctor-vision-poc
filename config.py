@@ -5,19 +5,28 @@
 # ════════════════════════════════════════════════════════════════════════════
 
 # ── General ──────────────────────────────────────────────────────────────────
-DEBUG = True   # show head-pose debug values (yaw/pitch/gaze, MAR, blinks) — see DRAW_HEAD_POSE
+# DEBUG = False → clean exam view: only alerts/warnings + score overlay visible.
+# DEBUG = True  → enables sub-gates below for detailed diagnostic overlays.
+DEBUG = True
+
+# Debug sub-gates (only active when DEBUG = True)
+DEBUG_BBOX        = True   # YOLO bounding boxes + confidence labels
+DEBUG_AUDIO       = False   # lip contour + MAR label + MIC dot
+DEBUG_MEDIAPIPE   = True   # iris/eye points, nose dot, H/V lines,
+                            # yaw/pitch/gaze values, EAR + blink count
 
 # ── Detection Toggles ────────────────────────────────────────────────────────
-# Set False to completely skip a detection — no alert, no processing overhead.
+# Set False to completely skip a detection — no alert, no processing, no drawing.
 
 # Head / gaze
 DETECT_LOOKING_AWAY    = True    # head rotated sideways (yaw)
 DETECT_LOOKING_DOWN    = True    # head tilted down (pitch)
 DETECT_LOOKING_UP      = True    # head tilted up (pitch)
 DETECT_LOOKING_SIDE    = True    # iris gaze left or right
-DETECT_FACE_HIDDEN     = True    # no face landmarks + no person detected
+DETECT_FACE_HIDDEN     = True    # person present but face landmarks absent
 DETECT_PARTIAL_FACE    = True    # face too small / far from camera
 DETECT_FAKE_PRESENCE   = True    # no blink / low head movement (liveness)
+DETECT_SPEAKER_AUDIO   = True    # speech active while lips are not moving
 
 # Objects
 DETECT_PHONE           = True
@@ -26,18 +35,17 @@ DETECT_HEADPHONE       = True
 DETECT_EARBUD          = True
 DETECT_MULTIPLE_PEOPLE = True
 
-# ── Drawing Toggles ──────────────────────────────────────────────────────────
-DRAW_HEAD_POSE = True    # iris dots, face-centre lines, nose dot
-DRAW_OBJECTS   = True    # YOLO bounding boxes + class labels
-DRAW_ALERTS    = True    # alert text overlay on the video frame
+# ── Drawing (always-on when True, independent of DEBUG) ──────────────────────
+DRAW_ALERTS       = True   # warn/alert banners
+DRAW_RISK_OVERLAY = True   # score + state panel (top-right)
 
 # ── Alert Cooldowns ──────────────────────────────────────────────────────────
 COOLDOWN_SECONDS       = 3    # seconds before the same alert can fire again
 RESET_COOLDOWN_SECONDS = 1    # seconds after condition clears before re-arm
 
 # ── Duration Thresholds (seconds a condition must persist before alerting) ───
-LOOKING_AWAY_THRESHOLD = 1.5   # head pose conditions (yaw, pitch, face_hidden, etc.)
-GAZE_THRESHOLD         = 1.0   # iris gaze conditions (looking_side) — faster trigger
+LOOKING_AWAY_THRESHOLD = 2.0   # head pose conditions (yaw, pitch, face_hidden, etc.)
+GAZE_THRESHOLD         = 1.5   # iris gaze conditions (looking_side) — faster trigger
 
 # ── Head Pose ────────────────────────────────────────────────────────────────
 LOOK_AWAY_YAW   = 0.20    # |nose offset / face_width| > this → looking away
@@ -65,16 +73,38 @@ MIN_VARIANCE     = 0.001
 NO_BLINK_TIMEOUT = 10
 LIVENESS_WEIGHTS = {"yaw": 0.45, "gaze": 0.45, "pitch": 0.10}
 
+# ── Lip Movement / Speaker Audio ─────────────────────────────────────────────
+LIP_MAR_SPEAKING    = 0.05
+LIP_MAR_YAWN        = 0.22
+LIP_YAWN_DURATION_S = 1.5
+LIP_DYNAMIC_STD_MIN = 0.010
+LIP_HISTORY         = 30
+
+AUDIO_SAMPLE_RATE   = 16_000
+AUDIO_CHANNELS      = 1
+AUDIO_CHUNK_SAMPLES = 512
+AUDIO_SPEECH_THRESH = 0.5
+SPEAKER_HOLD_S      = 1.5
+
 # ── Object Detection (temporal stability) ────────────────────────────────────
 OBJECT_WINDOW    = 15   # rolling frame window
 OBJECT_MIN_VOTES = 5    # object must appear in N of last OBJECT_WINDOW frames
-PHONE_MIN_VOTES  = 9    # stricter: phone must appear in 9/15 frames (reduces false positives)
+PHONE_MIN_VOTES  = 9    # phone  must appear in  9/15 frames (reduces false positives)
+BOOK_MIN_VOTES   = 10   # book   must appear in 10/15 frames (high false-positive rate)
+EARBUD_MIN_VOTES = 9   # earbud must appear in 9/15 frames (high false-positive rate)
 
 # ── Risk Scoring ─────────────────────────────────────────────────────────────
 RISK_SESSION_DURATION_S  = 3600  # assumed exam duration in seconds (used for decay interval)
-DRAW_RISK_OVERLAY        = True  # show score / state overlay on video frame
 TIMER_FLICKER_GRACE_S    = 1.5   # seconds condition can be absent before resetting continuous timers
 
 # ── Session Report ────────────────────────────────────────────────────────────
 SAVE_REPORT = True        # write a JSON report when the session ends
 REPORT_DIR  = "reports"   # folder where report files are saved
+
+# ── Proof capture ─────────────────────────────────────────────────────────────
+# Set SAVE_PROOF = False to disable all proof file writing.
+# Proof files are saved under REPORT_DIR/proof/.
+SAVE_PROOF       = True    # master toggle for proof capture
+PROOF_PRE_S      = 2.5    # seconds of video before the alert event
+PROOF_POST_S     = 2.5    # seconds of video after the alert event
+PROOF_VIDEO_FPS  = 20.0   # output video frame-rate for video/AV clips

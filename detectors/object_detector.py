@@ -91,9 +91,9 @@ class ObjectDetector:
 
                  default_conf=0.5, 
                  person_conf=0.3,
-                 book_conf=0.65,
-                 phone_conf=0.6,
-                 audio_conf=0.4,
+                 book_conf=0.7,
+                 phone_conf=0.65,
+                 audio_conf=0.41,
                  ):
 
         self.cheat_model = YOLO(cheat_model)
