@@ -92,7 +92,7 @@ YOLO_DEFAULT_CONF = 0.50   # fallback for any class not listed below
 YOLO_PERSON_CONF  = 0.30   # lower — person detection should be sensitive
 YOLO_PHONE_CONF   = 0.65
 YOLO_BOOK_CONF    = 0.70
-YOLO_AUDIO_CONF   = 0.41   # shared by headphone + earbud
+YOLO_AUDIO_CONF   = 0.3   # shared by headphone + earbud
 
 # ── Object Detection (temporal stability) ────────────────────────────────────
 OBJECT_WINDOW    = 15   # rolling frame window
